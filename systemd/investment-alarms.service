@@ -1,0 +1,17 @@
+[Unit]
+Description=Investment Alarms (US10Y/VIX/USDJPY/SMH-XLK)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/InvestmentAlarmForRaspiZero
+EnvironmentFile=-/etc/jpplus.env
+ExecStart=%h/InvestmentAlarmForRaspiZero/.venv/bin/python -u investment_alarms.py -c config.alarms.yml
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+

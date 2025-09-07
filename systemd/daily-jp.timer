@@ -1,0 +1,11 @@
+[Unit]
+Description=Timer: Daily Trading Helper JP PLUS (weekdays 15:10)
+
+[Timer]
+OnCalendar=Mon..Fri 15:10
+Persistent=true
+Unit=daily-jp.service
+
+[Install]
+WantedBy=timers.target
+
