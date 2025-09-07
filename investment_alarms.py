@@ -342,6 +342,13 @@ def send_all_notifications(cfg: AlarmConfig, subject: str, body: str, payload: D
     _send_email(cfg.email_enabled, cfg.email_to, subject, body)
 
 
+def should_send_email(cfg: AlarmConfig, changes: List[Dict[str, Any]]) -> bool:
+    """Return True if we should send an email for alarms.
+    Policy: 1) email feature enabled, 2) at least one change (threshold crossed).
+    """
+    return bool(cfg.email_enabled and changes)
+
+
 def format_summary(res: Dict[str, Any], changes_only: Optional[List[Dict[str, Any]]] = None, daily_summary: Optional[str] = None) -> str:
     lines: List[str] = []
     lines.append("[Investment Alarms]")
@@ -519,8 +526,11 @@ def main():
     body = format_summary(res, changes_only=changes, daily_summary=daily_summary)
     payload = {"changes": changes, "all": res.get("all", []), "date": res.get("date")}
 
-    if not args.no_email and write_outputs:
+    # Send only when there is at least one threshold-crossing change
+    if not args.no_email and write_outputs and should_send_email(cfg, changes):
         send_all_notifications(cfg, cfg.email_subject, body, payload)
+    else:
+        logger.info("No new triggers. Email suppressed.")
 
     if write_outputs:
         try:
