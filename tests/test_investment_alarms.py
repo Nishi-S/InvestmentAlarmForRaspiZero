@@ -7,7 +7,7 @@ import pandas as pd
 # Ensure repo root on path for direct module imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from investment_alarms import evaluate_alarms, AlarmConfig
+from investment_alarms import evaluate_alarms, AlarmConfig, should_send_email
 
 
 def df_from_series(values, start=dt.date(2024, 1, 1), col="Close"):
@@ -67,3 +67,23 @@ def test_evaluate_alarms_triggers_expected():
 
     # Ensure VIX hard is not triggered here
     assert "VIX_UP_HARD" not in names
+
+    # Email policy: with triggers and email_enabled=True -> should send
+    cfg2 = AlarmConfig(email_enabled=True)
+    assert should_send_email(cfg2, res["triggers"]) is True
+
+
+def test_no_triggers_suppresses_email():
+    # All series flat -> no crosses
+    flat = df_from_series([100.0, 100.0])
+    frames = {
+        "^TNX": df_from_series([46.0, 46.0]),  # 4.60% stays flat
+        "^VIX": df_from_series([20.0, 20.0]),
+        "USDJPY=X": df_from_series([150.0, 150.0]),
+        "SMH": flat.rename(columns={"Close": "Adj Close"}),
+        "XLK": flat.rename(columns={"Close": "Adj Close"}),
+    }
+    cfg = AlarmConfig(ratio_short="SMH", ratio_long="XLK", ratio_sma_days=2, email_enabled=True)
+    res = evaluate_alarms(cfg, frames)
+    assert res["triggers"] == []
+    assert should_send_email(cfg, res["triggers"]) is False
