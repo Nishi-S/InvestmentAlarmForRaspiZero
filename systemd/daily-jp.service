@@ -5,10 +5,11 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# リポジトリの場所に合わせて調整（ユーザ単位ユニットでは %h がホームを指す）
-WorkingDirectory=%h/InvestmentAlarmForRaspiZero
+# root 実行（system-level unit）用に絶対パスへ変更
+User=root
+WorkingDirectory=/home/nishi/InvestmentAlarmForRaspiZero
 EnvironmentFile=-/etc/jpplus.env
-ExecStart=%h/InvestmentAlarmForRaspiZero/.venv/bin/python -u daily_system_jp_plus.py -c config.jp.yml
+ExecStart=/home/nishi/InvestmentAlarmForRaspiZero/.venv/bin/python -u daily_system_jp_plus.py -c config.jp.yml
 Nice=10
 StandardOutput=journal
 StandardError=journal
@@ -16,7 +17,10 @@ StandardError=journal
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ProtectHome=yes
+# ProtectHome は /home を遮断するため root 実行では無効化
+# （必要なら ReadWritePaths=/home/nishi/InvestmentAlarmForRaspiZero と組み合わせて read-only 運用も可）
+# ProtectHome=read-only
+# ReadWritePaths=/home/nishi/InvestmentAlarmForRaspiZero
 ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
