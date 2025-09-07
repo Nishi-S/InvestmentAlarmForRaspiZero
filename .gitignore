@@ -85,6 +85,10 @@ Thumbs.db
 reports/
 # Long-term alarms outputs
 reports_alarms/
+# Local cache and artifacts
+cache/
+**/metrics.prom
+**/status.html
 # Ignore local config variants, keep examples tracked
 config.*.local.yml
 

@@ -21,11 +21,15 @@ import sys
 import json
 import argparse
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 
 import numpy as np
 import pandas as pd
+
+from utils_data import download_with_cache
+from notify import send_email as _send_email
+from status_page import generate_status_html
 
 # --- optional: load /etc/jpplus.env when run outside systemd ---
 def _load_env_file(path="/etc/jpplus.env"):
@@ -48,6 +52,8 @@ _load_env_file()
 class AlarmConfig:
     data_days: int = 260
     outdir: str = "reports_alarms"
+    cache_dir: str = "cache"
+    cache_max_age_days: int = 2
 
     # thresholds
     us10y_cross_up_hard: float = 4.60
@@ -62,9 +68,33 @@ class AlarmConfig:
     ratio_long: str = "XLK"
     ratio_sma_days: int = 50
 
+    # Additional ratio signals
+    ratio_signals: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"short": "HYG", "long": "IEF", "sma_days": 50, "name": "HYG/IEF_SMA50_DOWN", "severity": "INFO"},
+        {"short": "RSP", "long": "SPY", "sma_days": 50, "name": "RSP/SPY_SMA50_DOWN", "severity": "INFO"},
+        {"short": "IWM", "long": "QQQ", "sma_days": 50, "name": "IWM/QQQ_SMA50_DOWN", "severity": "INFO"},
+    ])
+
+    # Baseline regime checks
+    spy_sma200_down: bool = True
+    topix_t1306_sma200_down: bool = False
+
+    # Holidays / schedule
+    holiday_skip_us: bool = True
+
+    # Notifications (email only)
     email_enabled: bool = False
     email_to: Optional[str] = None
     email_subject: str = "INVESTMENT ALARM"
+
+    # Stateful alarms
+    notify_on_change_only: bool = True
+    cooldown_hours: int = 12
+    state_file: str = "reports_alarms/alarms_state.json"
+
+    # Digest with daily plan
+    digest_include_daily: bool = True
+    daily_latest_json: str = "reports/plan_latest.json"
 
 
 def load_config(path: str) -> AlarmConfig:
@@ -79,24 +109,8 @@ def load_config(path: str) -> AlarmConfig:
 
 
 # ==== Data ====
-def download_history(tickers: List[str], start: dt.date) -> Dict[str, pd.DataFrame]:
-    try:
-        import yfinance as yf
-    except Exception:
-        print("yfinance が必要です: pip install yfinance", file=sys.stderr)
-        sys.exit(1)
-    data: Dict[str, pd.DataFrame] = {}
-    for t in tickers:
-        try:
-            df = yf.download(t, start=start, auto_adjust=False, progress=False)
-            if df is None or df.empty:
-                print(f"[WARN] データなし: {t}")
-                continue
-            df = df.dropna(how="all")
-            data[t] = df
-        except Exception as e:
-            print(f"[WARN] 取得失敗: {t}: {e}")
-    return data
+def download_history(tickers: List[str], start: dt.date, cache_dir: str, max_age_days: int) -> Dict[str, pd.DataFrame]:
+    return download_with_cache(tickers, start=start, end=None, cache_dir=cache_dir, max_age_days=max_age_days)
 
 
 def _last_two(series: pd.Series):
@@ -231,6 +245,65 @@ def evaluate_alarms(cfg: AlarmConfig, frames: Dict[str, pd.DataFrame]) -> Dict[s
     else:
         results.append({"name": "SMH/XLK", "error": f"{sh} or {lg} data missing"})
 
+    # 5) Additional ratio signals
+    for sig in cfg.ratio_signals:
+        sh = sig.get("short"); lg = sig.get("long"); sma_days = int(sig.get("sma_days", 50))
+        name = sig.get("name") or f"{sh}/{lg}_SMA{sma_days}_DOWN"
+        sev = sig.get("severity", "INFO")
+        if (sh in frames) and (lg in frames):
+            df_sh = _adj_close(frames[sh]).rename("short")
+            df_lg = _adj_close(frames[lg]).rename("long")
+            df = pd.concat([df_sh, df_lg], axis=1, join="inner").dropna()
+            if not df.empty:
+                ratio = (df["short"] / df["long"]).rename("ratio")
+                sma = ratio.rolling(sma_days).mean()
+                r_prev, r_curr = _last_two(ratio)
+                s_prev, s_curr = _last_two(sma)
+                if r_prev is not None and s_prev is not None and not (np.isnan(s_prev) or np.isnan(s_curr)):
+                    cross_down = (r_prev >= s_prev) and (r_curr < s_curr)
+                    results.append({
+                        "name": name,
+                        "severity": sev,
+                        "desc": f"{sh}/{lg} closes below SMA{sma_days}",
+                        "triggered": bool(cross_down),
+                        "value_prev": round(r_prev, 6),
+                        "value": round(r_curr, 6),
+                        "sma_prev": round(s_prev, 6),
+                        "sma": round(s_curr, 6),
+                        "ts": now_ts,
+                    })
+        else:
+            results.append({"name": name, "error": f"{sh} or {lg} data missing"})
+
+    # 6) Baseline regimes
+    def _sma_down(name: str, sym: str, days: int = 200):
+        if sym not in frames:
+            results.append({"name": name, "error": f"{sym} data missing"})
+            return
+        close = _adj_close(frames[sym])
+        sma = close.rolling(days).mean()
+        c_prev, c_curr = _last_two(close)
+        s_prev, s_curr = _last_two(sma)
+        if c_prev is None or s_prev is None or np.isnan(s_prev) or np.isnan(s_curr):
+            return
+        cross_down = (c_prev >= s_prev) and (c_curr < s_curr)
+        results.append({
+            "name": name,
+            "severity": "INFO",
+            "desc": f"{sym} closes below SMA{days}",
+            "triggered": bool(cross_down),
+            "value_prev": round(c_prev, 6),
+            "value": round(c_curr, 6),
+            "sma_prev": round(s_prev, 6),
+            "sma": round(s_curr, 6),
+            "ts": now_ts,
+        })
+
+    if cfg.spy_sma200_down:
+        _sma_down("SPY_SMA200_DOWN", "SPY", 200)
+    if cfg.topix_t1306_sma200_down:
+        _sma_down("1306.T_SMA200_DOWN", "1306.T", 200)
+
     # summary
     triggered = [r for r in results if r.get("triggered")]
     return {
@@ -241,67 +314,140 @@ def evaluate_alarms(cfg: AlarmConfig, frames: Dict[str, pd.DataFrame]) -> Dict[s
 
 
 # ==== Output / Email ====
-def send_email(cfg: AlarmConfig, subject: str, body: str):
-    if not cfg.email_enabled or not cfg.email_to:
-        return
-    user = os.environ.get("EMAIL_USER")
-    pwd  = os.environ.get("EMAIL_PASS")
-    if not user or not pwd:
-        print("[WARN] EMAIL_USER / EMAIL_PASS が未設定のためメール送信をスキップ")
-        return
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = user
-        msg["To"] = cfg.email_to
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-            smtp.login(user, pwd)
-            smtp.sendmail(user, [cfg.email_to], msg.as_string())
-        print(f"[INFO] メール送信完了: {cfg.email_to}")
-    except Exception as e:
-        print(f"[WARN] メール送信に失敗: {e}")
+def send_all_notifications(cfg: AlarmConfig, subject: str, body: str, payload: Dict[str, Any]):
+    _send_email(cfg.email_enabled, cfg.email_to, subject, body)
 
 
-def format_summary(res: Dict[str, Any]) -> str:
+def format_summary(res: Dict[str, Any], changes_only: Optional[List[Dict[str, Any]]] = None, daily_summary: Optional[str] = None) -> str:
     lines: List[str] = []
     lines.append("[Investment Alarms]")
-    if not res["triggers"]:
-        lines.append("No new triggers.")
+    changes = changes_only if changes_only is not None else res.get("triggers", [])
+    if not changes:
+        lines.append("No state changes.")
     else:
-        for r in res["triggers"]:
+        for r in changes:
             name = r.get("name", "")
             sev  = r.get("severity", "")
             desc = r.get("desc", "")
             val  = r.get("value")
             th   = r.get("threshold")
             lines.append(f"- {name} [{sev}] {desc} value={val}{'' if th is None else f' thr={th}'}")
+    if daily_summary:
+        lines.append("\n[Daily Plan]")
+        lines.append(daily_summary)
     return "\n".join(lines)
+
+
+def _is_us_trading_day() -> bool:
+    # Use pandas_market_calendars if available, else Mon-Fri
+    try:
+        import pandas_market_calendars as mcal
+        nyse = mcal.get_calendar("XNYS")
+        today = pd.Timestamp.today(tz="UTC").tz_localize(None).normalize()
+        sched = nyse.schedule(start_date=today, end_date=today)
+        return not sched.empty
+    except Exception:
+        wd = dt.date.today().weekday()
+        return wd < 5
+
+
+def _load_state(path: str) -> Dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_state(path: str, state: Dict[str, Any]):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _compute_changes(state: Dict[str, Any], results: List[Dict[str, Any]], cooldown_hours: int) -> List[Dict[str, Any]]:
+    now = dt.datetime.now()
+    changes: List[Dict[str, Any]] = []
+    for r in results:
+        name = r.get("name")
+        if not name or "triggered" not in r:
+            continue
+        prev = state.get(name, {}).get("triggered", False)
+        last_ts = state.get(name, {}).get("last_notified")
+        changed = (bool(r["triggered"]) != bool(prev))
+        within_cooldown = False
+        if last_ts:
+            try:
+                last_dt = dt.datetime.fromisoformat(last_ts)
+                within_cooldown = (now - last_dt).total_seconds() < cooldown_hours * 3600
+            except Exception:
+                within_cooldown = False
+        if changed or not within_cooldown:
+            changes.append(r)
+    return changes
 
 
 # ==== Main ====
 def main():
     ap = argparse.ArgumentParser(description="Long-term Investment Alarms")
     ap.add_argument("-c", "--config", default="config.alarms.yml")
+    ap.add_argument("--outdir", default=None, help="override output dir")
+    ap.add_argument("--no-email", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.outdir:
+        cfg.outdir = args.outdir
+
+    # Holiday-aware skip
+    if cfg.holiday_skip_us and not _is_us_trading_day():
+        print("[INFO] Skipping (not a US trading day)")
+        return
+
+    start_all = dt.datetime.now()
     start = dt.date.today() - dt.timedelta(days=cfg.data_days)
 
     tickers = ["^TNX", "^VIX", "USDJPY=X", cfg.ratio_short, cfg.ratio_long]
+    for sig in cfg.ratio_signals:
+        tickers.extend([sig.get("short"), sig.get("long")])
+    if cfg.spy_sma200_down:
+        tickers.append("SPY")
+    if cfg.topix_t1306_sma200_down:
+        tickers.append("1306.T")
+    tickers = [t for t in sorted(set(tickers)) if t]
+
     print(f"[INFO] Downloading: {', '.join(tickers)} since {start}")
-    frames = download_history(tickers, start)
+    frames = download_history(tickers, start, cache_dir=cfg.cache_dir, max_age_days=cfg.cache_max_age_days)
 
     res = evaluate_alarms(cfg, frames)
 
-    os.makedirs(cfg.outdir, exist_ok=True)
+    # Stateful changes
+    state = _load_state(cfg.state_file)
+    changes = _compute_changes(state, res["all"], cfg.cooldown_hours) if cfg.notify_on_change_only else res["triggers"]
+    now_iso = dt.datetime.now().isoformat(timespec="seconds")
+    for r in res["all"]:
+        n = r.get("name"); trig = bool(r.get("triggered", False))
+        if not n:
+            continue
+        st = state.get(n, {})
+        st["triggered"] = trig
+        if r in changes:
+            st["last_notified"] = now_iso
+        state[n] = st
+    _save_state(cfg.state_file, state)
+
+    write_outputs = not args.dry_run
+    if write_outputs:
+        os.makedirs(cfg.outdir, exist_ok=True)
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     latest_json = os.path.join(cfg.outdir, "alarms_latest.json")
-    with open(latest_json, "w", encoding="utf-8") as f:
-        json.dump(res, f, ensure_ascii=False, indent=2)
+    if write_outputs:
+        with open(latest_json, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=2)
 
-    # flat CSV of all results
     rows = []
     for r in res["all"]:
         base = {
@@ -319,14 +465,53 @@ def main():
         }
         rows.append(base)
     out_csv = os.path.join(cfg.outdir, f"alarms_{ts}.csv")
-    pd.DataFrame(rows).to_csv(out_csv, index=False, encoding="utf-8")
+    if write_outputs:
+        pd.DataFrame(rows).to_csv(out_csv, index=False, encoding="utf-8")
 
-    body = format_summary(res)
-    send_email(cfg, cfg.email_subject, body)
+    # Digest with daily plan
+    daily_summary = None
+    if cfg.digest_include_daily and os.path.exists(cfg.daily_latest_json):
+        try:
+            with open(cfg.daily_latest_json, "r", encoding="utf-8") as f:
+                daily = json.load(f)
+            picks = daily.get("top", [])
+            if not picks:
+                daily_summary = "No picks."
+            else:
+                lines = []
+                for r in picks:
+                    lines.append(f"- {r['ticker']} shares={r['shares']} close={r['close_ref']} score={r['score_total']}")
+                daily_summary = "\n".join(lines)
+        except Exception:
+            pass
+
+    body = format_summary(res, changes_only=changes, daily_summary=daily_summary)
+    payload = {"changes": changes, "all": res.get("all", []), "date": res.get("date")}
+
+    if not args.no_email and write_outputs:
+        send_all_notifications(cfg, cfg.email_subject, body, payload)
+
+    if write_outputs:
+        try:
+            generate_status_html(os.path.join(cfg.outdir, "status.html"), daily_json_path=cfg.daily_latest_json, alarms_json_path=latest_json)
+        except Exception:
+            pass
+        try:
+            runtime_sec = (dt.datetime.now() - start_all).total_seconds()
+            metrics = [
+                f"alarms_triggers_count {len([x for x in res.get('all', []) if x.get('triggered')])}",
+                f"alarms_changes_count {len(changes)}",
+                f"script_run_seconds{{script=\"alarms\"}} {runtime_sec:.3f}",
+            ]
+            with open(os.path.join(cfg.outdir, "metrics.prom"), "w", encoding="utf-8") as f:
+                f.write("\n".join(metrics) + "\n")
+        except Exception:
+            pass
 
     print("\n=== ALARMS SUMMARY ===")
     print(body)
-    print(f"\nSaved:\n - {out_csv}\n - {latest_json}")
+    if write_outputs:
+        print(f"\nSaved:\n - {out_csv}\n - {latest_json}")
 
 
 if __name__ == "__main__":

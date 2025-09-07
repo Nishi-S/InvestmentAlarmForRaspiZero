@@ -23,6 +23,10 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
+from utils_data import download_with_cache
+from notify import send_email as _send_email
+from status_page import generate_status_html
+
 # --- optional: load /etc/jpplus.env when run outside systemd ---
 def _load_env_file(path="/etc/jpplus.env"):
     try:
@@ -112,6 +116,23 @@ class Config:
     email_enabled: bool = False
     email_to: Optional[str] = None
     email_subject: str = "DAILY-JP PLAN"
+    # 追加オプション
+    holiday_skip_jp: bool = True
+    cache_dir: str = "cache"
+    cache_max_age_days: int = 2
+    # ホールド＆エグジット
+    hold_days: int = 1
+    trailing_stop_mult: float = 0.0  # 0=無効
+    # サイジング
+    min_notional_jpy: float = 0.0
+    notional_cap_per_ticker_jpy: float = 1e18
+    commission_per_trade_jpy: float = 0.0
+    # 再エントリークールオフ
+    reentry_cooloff_days: int = 0
+    picks_history_file: str = "reports/picks_history.json"
+    # イベント自動ブロック拡張
+    event_block_days_before: int = 0
+    event_block_days_after: int = 0
     # スコア重み
     w_trend: float = 0.30
     w_momo: float = 0.25
@@ -130,20 +151,19 @@ def load_config(path: str) -> Config:
     return Config(**raw)
 
 # ===== データ取得 =====
-def download_history(tickers: List[str], start: dt.date) -> Dict[str, pd.DataFrame]:
+def download_history(tickers: List[str], start: dt.date, cache_dir: str, max_age_days: int) -> Dict[str, pd.DataFrame]:
+    return download_with_cache(tickers, start=start, end=None, cache_dir=cache_dir, max_age_days=max_age_days)
+
+def _is_jp_trading_day() -> bool:
+    # jpholiday があれば祝日も判定。なければ月〜金
     try:
-        import yfinance as yf
+        import jpholiday  # type: ignore
+        today = dt.date.today()
+        if today.weekday() >= 5:
+            return False
+        return not jpholiday.is_holiday(today)
     except Exception:
-        print("yfinance が必要です: pip install yfinance", file=sys.stderr)
-        sys.exit(1)
-    data = {}
-    for t in tickers:
-        df = yf.download(t, start=start, auto_adjust=False, progress=False)
-        if df is None or df.empty:
-            print(f"[WARN] データなし: {t}")
-            continue
-        data[t] = df.dropna(how="all")
-    return data
+        return dt.date.today().weekday() < 5
 
 # ===== レジーム判定 =====
 def risk_on_regime(bench_df: pd.DataFrame, ma: int) -> bool:
@@ -313,13 +333,49 @@ def load_event_block(cfg: Config) -> Dict[str, dt.date]:
             df = pd.read_csv(cfg.events_csv)
             for _, r in df.iterrows():
                 try:
-                    until = dt.datetime.strptime(str(r["until"]), "%Y-%m-%d").date()
-                    block_until[str(r["ticker"]).strip()] = until
+                    tkr = str(r["ticker"]).strip()
+                    if "until" in r and not pd.isna(r["until"]):
+                        until = dt.datetime.strptime(str(r["until"]), "%Y-%m-%d").date()
+                    elif "date" in r and not pd.isna(r["date"]):
+                        ev = dt.datetime.strptime(str(r["date"]), "%Y-%m-%d").date()
+                        until = ev + dt.timedelta(days=cfg.event_block_days_after)
+                        start_block = ev - dt.timedelta(days=cfg.event_block_days_before)
+                        # we will only store until here; main uses today to compare
+                    else:
+                        continue
+                    block_until[tkr] = until
                 except Exception:
                     continue
         except Exception as e:
             print(f"[WARN] events_csv 読み込み失敗: {e}")
     return block_until
+
+def load_reentry_block(cfg: Config) -> Dict[str, dt.date]:
+    if cfg.reentry_cooloff_days <= 0:
+        return {}
+    path = cfg.picks_history_file
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            arr = json.load(f)
+        block: Dict[str, dt.date] = {}
+        for rec in arr:
+            t = str(rec.get("ticker"))
+            d = rec.get("date")
+            if not t or not d:
+                continue
+            try:
+                dt0 = dt.datetime.strptime(d, "%Y-%m-%d").date()
+                until = dt0 + dt.timedelta(days=cfg.reentry_cooloff_days)
+                prev = block.get(t)
+                if (prev is None) or (until > prev):
+                    block[t] = until
+            except Exception:
+                continue
+        return block
+    except Exception:
+        return {}
 
 # ===== 候補選定（却下理由つき） =====
 def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, block_until: Dict[str, dt.date]):
@@ -356,6 +412,15 @@ def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, blo
         raw_shares = math.floor(risk_budget / risk_per_share)
         lot = cfg.lot_size_map.get(t, cfg.lot_size_default) if cfg.lot_size_default else 1
         shares = max((raw_shares // max(lot, 1)) * max(lot, 1), 0)
+        # 最低約定金額を満たすよう調整
+        if cfg.min_notional_jpy > 0 and r["close"] * shares < cfg.min_notional_jpy:
+            need = int(math.ceil(cfg.min_notional_jpy / max(r["close"], 1e-6)))
+            shares = max((need // max(lot, 1)) * max(lot, 1), shares)
+        # ティッカー上限
+        if cfg.notional_cap_per_ticker_jpy < 1e17:
+            cap_shares = int(math.floor(cfg.notional_cap_per_ticker_jpy / max(r["close"], 1e-6)))
+            cap_shares = max((cap_shares // max(lot, 1)) * max(lot, 1), 0)
+            shares = min(shares, cap_shares)
         stop = r["close"] - cfg.atr_mult_stop * r["atr"]
         target = r["close"] + 3.0 * r["atr"]
 
@@ -372,7 +437,7 @@ def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, blo
             "risk_per_trade": cfg.risk_per_trade,
             "atr_mult_stop": cfg.atr_mult_stop,
             "entry_plan": "next_open",
-            "exit_plan": "1d_close",
+            "exit_plan": ("trail" if cfg.trailing_stop_mult and cfg.trailing_stop_mult > 0 else f"{cfg.hold_days}d_close"),
             "score_total": float(r["score_total"]),
             "score_breakdown": f"T{r['score_trend']:.2f}|M{r['score_momo']:.2f}|V{r['score_volume']:.2f}|B{r['score_breakout']:.2f}|S{r['score_structure']:.2f}",
             "volr": float(r["volr"]),
@@ -422,14 +487,26 @@ def send_email(cfg: Config, subject: str, body: str):
 def main():
     p = argparse.ArgumentParser(description="Daily Trading Helper JP PLUS")
     p.add_argument("-c", "--config", default="config.jp.yml")
+    p.add_argument("--outdir", default=None)
+    p.add_argument("--no-email", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    if args.outdir:
+        cfg.outdir = args.outdir
+
+    # 休日スキップ（日本）
+    if cfg.holiday_skip_jp and not _is_jp_trading_day():
+        print("[INFO] Skipping (not a JP trading day)")
+        return
+
+    start_all = dt.datetime.now()
     start = dt.date.today() - dt.timedelta(days=cfg.data_days)
     tickers = sorted(set([cfg.benchmark] + cfg.universe))
     print(f"[INFO] Downloading: {', '.join(tickers)}  since {start}")
 
-    frames = download_history(tickers, start)
+    frames = download_history(tickers, start, cache_dir=cfg.cache_dir, max_age_days=cfg.cache_max_age_days)
     if cfg.benchmark not in frames or frames[cfg.benchmark].empty:
         print("[ERROR] ベンチマークの価格系列を取得できませんでした。", file=sys.stderr)
         sys.exit(2)
@@ -437,15 +514,25 @@ def main():
     is_risk_on = risk_on_regime(frames[cfg.benchmark], cfg.regime_ma)
     score_df = build_scores(cfg, {t: frames[t] for t in cfg.universe if t in frames})
 
-    os.makedirs(cfg.outdir, exist_ok=True)
+    write_outputs = not args.dry_run
+    if write_outputs:
+        os.makedirs(cfg.outdir, exist_ok=True)
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     ranks_csv = os.path.join(cfg.outdir, f"ranks_{ts}.csv")
-    score_df.to_csv(ranks_csv, index=False, encoding="utf-8")
+    if write_outputs:
+        score_df.to_csv(ranks_csv, index=False, encoding="utf-8")
 
     block_until = load_event_block(cfg)
+    # 再エントリーブロックを併合
+    re_block = load_reentry_block(cfg)
+    for k, v in re_block.items():
+        prev = block_until.get(k)
+        if (prev is None) or (v > prev):
+            block_until[k] = v
     plan_df, rej_df = decide_candidates(cfg, score_df, is_risk_on, block_until)
     plan_csv = os.path.join(cfg.outdir, f"plan_{ts}.csv")
-    plan_df.to_csv(plan_csv, index=False, encoding="utf-8")
+    if write_outputs:
+        plan_df.to_csv(plan_csv, index=False, encoding="utf-8")
 
     # 最新要約JSON
     latest_json = os.path.join(cfg.outdir, "plan_latest.json")
@@ -454,8 +541,9 @@ def main():
         "regime": "RISK_ON" if is_risk_on else "RISK_OFF",
         "top": plan_df.to_dict(orient="records") if not plan_df.empty else [],
     }
-    with open(latest_json, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+    if write_outputs:
+        with open(latest_json, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
     # メール本文（要約＋YAML）
     date_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M JST")
@@ -529,7 +617,11 @@ def main():
     body_lines.extend(yaml_lines)
     body = "\n".join(body_lines)
 
-    send_email(cfg, cfg.email_subject, body)
+    if not args.no_email and write_outputs:
+        try:
+            _send_email(cfg.email_enabled, cfg.email_to, cfg.email_subject, body)
+        except Exception:
+            send_email(cfg, cfg.email_subject, body)
 
     # コンソール要約
     print("\n=== SUMMARY ===")
@@ -538,6 +630,39 @@ def main():
         print("No picks for tomorrow based on current regime/rules.")
     else:
         print(plan_df.to_string(index=False))
+
+    # 履歴に追記（再エントリー制御用）
+    if write_outputs:
+        try:
+            hist_path = cfg.picks_history_file
+            os.makedirs(os.path.dirname(hist_path), exist_ok=True)
+            prev = []
+            if os.path.exists(hist_path):
+                with open(hist_path, "r", encoding="utf-8") as f:
+                    prev = json.load(f)
+            for _, r in plan_df.iterrows():
+                prev.append({"date": dt.date.today().isoformat(), "ticker": r["ticker"]})
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(prev[-1000:], f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ステータスHTMLとメトリクス
+    if write_outputs:
+        try:
+            generate_status_html(os.path.join(cfg.outdir, "status.html"), daily_json_path=latest_json, alarms_json_path="reports_alarms/alarms_latest.json")
+        except Exception:
+            pass
+        try:
+            runtime_sec = (dt.datetime.now() - start_all).total_seconds()
+            metrics = [
+                f"daily_picks_count {len(plan_df) if not plan_df.empty else 0}",
+                f"script_run_seconds{{script=\"daily\"}} {runtime_sec:.3f}",
+            ]
+            with open(os.path.join(cfg.outdir, "metrics.prom"), "w", encoding="utf-8") as f:
+                f.write("\n".join(metrics) + "\n")
+        except Exception:
+            pass
 
     print(f"\nSaved:\n - {plan_csv}\n - {ranks_csv}\n - {latest_json}")
     print("\n※ 実売買前に、取引コスト・税制・流動性・決算/材料・約定方法等を必ずご確認ください。")
