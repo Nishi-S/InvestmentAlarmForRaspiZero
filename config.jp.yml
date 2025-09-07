@@ -1,0 +1,95 @@
+# config.jp.yml — 日本株・個別株・20万円・1株取引 前提（東京エレクトロン除外）
+universe:
+  - 8306.T   # 三菱UFJ
+  - 8316.T   # 三井住友FG
+  - 8411.T   # みずほ
+  - 8058.T   # 三菱商事
+  - 8031.T   # 三井物産
+  - 8053.T   # 住友商事
+  - 7203.T   # トヨタ
+  - 7267.T   # ホンダ
+  - 7201.T   # 日産
+  - 7261.T   # マツダ
+  - 6758.T   # ソニーG
+  - 6501.T   # 日立
+  # - 8035.T # 東京エレクトロン（除外）
+  - 6857.T   # アドバンテスト
+  - 6920.T   # レーザーテック
+  - 6981.T   # 村田製作所
+  - 6762.T   # TDK
+  - 7735.T   # SCREEN
+  - 9432.T   # NTT
+  - 9433.T   # KDDI
+  - 9434.T   # ソフトバンク
+  - 9984.T   # ソフトバンクG
+  - 3382.T   # セブン&アイ
+  - 9843.T   # ニトリHD
+  - 8267.T   # イオン
+  - 6301.T   # コマツ
+  - 6367.T   # ダイキン
+  - 6594.T   # 日本電産
+  - 4063.T   # 信越化学
+benchmark: 1306.T
+
+# リスクオン時のみ個別株から採用、オフは休む（defensiveは空）
+risk_on_assets:
+  - 8306.T
+  - 8316.T
+  - 8411.T
+  - 8058.T
+  - 8031.T
+  - 8053.T
+  - 7203.T
+  - 7267.T
+  - 7201.T
+  - 7261.T
+  - 6758.T
+  - 6501.T
+  # - 8035.T
+  - 6857.T
+  - 6920.T
+  - 6981.T
+  - 6762.T
+  - 7735.T
+  - 9432.T
+  - 9433.T
+  - 9434.T
+  - 9984.T
+  - 3382.T
+  - 9843.T
+  - 8267.T
+  - 6301.T
+  - 6367.T
+  - 6594.T
+  - 4063.T
+defensive_assets: []   # 原則「休む」
+
+data_days: 420
+regime_ma: 100
+atr_period: 14
+atr_mult_stop: 2.0
+top_k: 1
+capital: 200000
+risk_per_trade: 0.005  # 0.5% = 1,000円
+min_turnover_jpy: 100000000  # 20日平均売買代金 1億円未満は除外（目安）
+hold_days: 1
+outdir: reports
+
+# 1株取引前提（単元未満株）: 1。100株単元のみなら 100 に変更
+lot_size_default: 1
+lot_size_map: {}
+
+# イベント除外リスト（任意）: CSV で "ticker,until,reason"（untilはYYYY-MM-DD）
+events_csv: events_ignore.csv
+
+# メール送信（任意）: Gmailのアプリパスワード推奨（環境変数 EMAIL_USER / EMAIL_PASS を使用）
+email_enabled: false
+email_to: "you@example.com"
+email_subject: "DAILY-JP PLAN"
+
+# スコアの重み（必要なら調整）
+w_trend: 0.30
+w_momo: 0.25
+w_volume: 0.20
+w_breakout: 0.15
+w_structure: 0.10
