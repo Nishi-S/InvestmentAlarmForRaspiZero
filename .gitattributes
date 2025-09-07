@@ -1,0 +1,19 @@
+# Normalize line endings and mark text files
+* text=auto eol=lf
+
+# Explicit LF for common text types
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.csv text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+
+# Common binary formats
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
