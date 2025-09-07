@@ -1,0 +1,29 @@
+# config.alarms.yml — 長期投資向けアラーム設定
+
+# 取得期間（日）: SMAやクロス判定のために十分な日数を確保
+data_days: 260
+
+# 出力先
+outdir: reports_alarms
+
+# 米10年金利（US10Y=^TNX/10）
+us10y_cross_up_hard: 4.60
+us10y_cross_down_hard: 3.90
+
+# VIX
+vix_cross_up_soft: 22.0
+vix_cross_up_hard: 28.0
+
+# USDJPY（USDJPY=X）
+usdjpy_cross_down: 145.0
+
+# 比率: SMH/XLK の 50日線
+ratio_short: SMH
+ratio_long: XLK
+ratio_sma_days: 50
+
+# メール送信（任意）
+email_enabled: false
+email_to: "you@example.com"
+email_subject: "INVESTMENT ALARM"
+

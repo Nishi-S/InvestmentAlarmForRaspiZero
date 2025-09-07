@@ -1,0 +1,11 @@
+[Unit]
+Description=Timer: Investment Alarms (weekdays 08:05)
+
+[Timer]
+OnCalendar=Mon..Fri 08:05
+Persistent=true
+Unit=investment-alarms.service
+
+[Install]
+WantedBy=timers.target
+

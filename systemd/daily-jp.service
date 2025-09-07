@@ -1,0 +1,18 @@
+[Unit]
+Description=Daily Trading Helper JP PLUS (oneshot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# リポジトリの場所に合わせて調整（ユーザ単位ユニットでは %h がホームを指す）
+WorkingDirectory=%h/InvestmentAlarmForRaspiZero
+EnvironmentFile=-/etc/jpplus.env
+ExecStart=%h/InvestmentAlarmForRaspiZero/.venv/bin/python -u daily_system_jp_plus.py -c config.jp.yml
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+
