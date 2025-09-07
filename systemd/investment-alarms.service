@@ -5,16 +5,19 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/InvestmentAlarmForRaspiZero
+User=root
+WorkingDirectory=/home/nishi/InvestmentAlarmForRaspiZero
 EnvironmentFile=-/etc/jpplus.env
-ExecStart=%h/InvestmentAlarmForRaspiZero/.venv/bin/python -u investment_alarms.py -c config.alarms.yml
+ExecStart=/home/nishi/InvestmentAlarmForRaspiZero/.venv/bin/python -u investment_alarms.py -c config.alarms.yml
 Nice=10
 StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ProtectHome=yes
+# ProtectHome は /home を遮断するため root 実行では無効化
+# ProtectHome=read-only
+# ReadWritePaths=/home/nishi/InvestmentAlarmForRaspiZero
 ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
