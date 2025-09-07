@@ -30,6 +30,9 @@ import pandas as pd
 from utils_data import download_with_cache
 from notify import send_email as _send_email
 from status_page import generate_status_html
+import logging
+
+logger = logging.getLogger(__name__)
 
 # --- optional: load /etc/jpplus.env when run outside systemd ---
 def _load_env_file(path="/etc/jpplus.env"):
@@ -43,7 +46,7 @@ def _load_env_file(path="/etc/jpplus.env"):
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
     except Exception as e:
-        print(f"[WARN] failed to read env file {path}: {e}")
+        logger.warning("failed to read env file %s: %s", path, e)
 _load_env_file()
 
 
@@ -343,7 +346,10 @@ def _is_us_trading_day() -> bool:
     try:
         import pandas_market_calendars as mcal
         nyse = mcal.get_calendar("XNYS")
-        today = pd.Timestamp.today(tz="UTC").tz_localize(None).normalize()
+        # NOTE: Use naive UTC date to avoid tz_localize TypeError on aware timestamps
+        #   (cf. pd.Timestamp.today(tz="UTC").tz_localize(None) raises on aware ts)
+        #   A stable approach is utcnow().normalize() which returns naive midnight UTC.
+        today = pd.Timestamp.utcnow().normalize()
         sched = nyse.schedule(start_date=today, end_date=today)
         return not sched.empty
     except Exception:
@@ -391,6 +397,10 @@ def _compute_changes(state: Dict[str, Any], results: List[Dict[str, Any]], coold
 
 # ==== Main ====
 def main():
+    # Logging 基本設定
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="[%(levelname)s] %(message)s")
+
     ap = argparse.ArgumentParser(description="Long-term Investment Alarms")
     ap.add_argument("-c", "--config", default="config.alarms.yml")
     ap.add_argument("--outdir", default=None, help="override output dir")
@@ -404,7 +414,7 @@ def main():
 
     # Holiday-aware skip
     if cfg.holiday_skip_us and not _is_us_trading_day():
-        print("[INFO] Skipping (not a US trading day)")
+        logger.info("Skipping (not a US trading day)")
         return
 
     start_all = dt.datetime.now()
@@ -419,7 +429,7 @@ def main():
         tickers.append("1306.T")
     tickers = [t for t in sorted(set(tickers)) if t]
 
-    print(f"[INFO] Downloading: {', '.join(tickers)} since {start}")
+    logger.info("Downloading: %s since %s", ", ".join(tickers), start)
     frames = download_history(tickers, start, cache_dir=cfg.cache_dir, max_age_days=cfg.cache_max_age_days)
 
     res = evaluate_alarms(cfg, frames)
@@ -508,10 +518,9 @@ def main():
         except Exception:
             pass
 
-    print("\n=== ALARMS SUMMARY ===")
-    print(body)
+    logger.info("\n=== ALARMS SUMMARY ===\n%s", body)
     if write_outputs:
-        print(f"\nSaved:\n - {out_csv}\n - {latest_json}")
+        logger.info("\nSaved:\n - %s\n - %s", out_csv, latest_json)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ Daily Trading Helper JP PLUS (1-day cycle) — drop-in replacement 2025-09-06
 """
 
 import os
+import logging
 import sys
 import math
 import json
@@ -27,6 +28,8 @@ from utils_data import download_with_cache
 from notify import send_email as _send_email
 from status_page import generate_status_html
 
+logger = logging.getLogger(__name__)
+
 # --- optional: load /etc/jpplus.env when run outside systemd ---
 def _load_env_file(path="/etc/jpplus.env"):
     try:
@@ -39,7 +42,7 @@ def _load_env_file(path="/etc/jpplus.env"):
                     k, v = line.split("=", 1)
                     os.environ.setdefault(k.strip(), v.strip())
     except Exception as e:
-        print(f"[WARN] failed to read env file {path}: {e}")
+        logger.warning("failed to read env file %s: %s", path, e)
 _load_env_file()
 
 # ===== 指標関数 =====
@@ -347,7 +350,7 @@ def load_event_block(cfg: Config) -> Dict[str, dt.date]:
                 except Exception:
                     continue
         except Exception as e:
-            print(f"[WARN] events_csv 読み込み失敗: {e}")
+            logger.warning("events_csv 読み込み失敗: %s", e)
     return block_until
 
 def load_reentry_block(cfg: Config) -> Dict[str, dt.date]:
@@ -460,31 +463,92 @@ def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, blo
 
     return pd.DataFrame(plan_rows), pd.DataFrame(rej_rows)
 
-# ===== メール送信 =====
-def send_email(cfg: Config, subject: str, body: str):
-    if not cfg.email_enabled or not cfg.email_to:
-        return
-    user = os.environ.get("EMAIL_USER")
-    pwd  = os.environ.get("EMAIL_PASS")
-    if not user or not pwd:
-        print("[WARN] EMAIL_USER / EMAIL_PASS が未設定のためメール送信をスキップ")
-        return
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = user
-        msg["To"] = cfg.email_to
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-            smtp.login(user, pwd)
-            smtp.sendmail(user, [cfg.email_to], msg.as_string())
-        print(f"[INFO] メール送信完了: {cfg.email_to}")
-    except Exception as e:
-        print(f"[WARN] メール送信に失敗: {e}")
+# ===== メール本文生成（テスト容易化のため分離） =====
+def format_daily_email(
+    cfg: Config,
+    is_risk_on: bool,
+    plan_df: pd.DataFrame,
+    rej_df: pd.DataFrame,
+    plan_csv_path: str,
+    ranks_csv_path: str,
+) -> str:
+    date_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M JST")
+    body_lines = [
+        f"Regime: {'RISK_ON' if is_risk_on else 'RISK_OFF'} (bench={cfg.benchmark})   Date: {date_str}",
+        f"Capital: {cfg.capital:.0f}  Risk/Trade: {cfg.risk_per_trade*100:.1f}%  ATRx: {cfg.atr_mult_stop}  Lot: {cfg.lot_size_default}",
+        f"Universe: {len(cfg.universe)} tickers",
+        "",
+        "[Plan]",
+    ]
+    if plan_df.empty:
+        body_lines.append("No picks based on current rules.")
+    else:
+        for _, r in plan_df.iterrows():
+            body_lines.append(
+                f"- {r['ticker']}  shares={r['shares']}  close={r['close_ref']}  ATR={r['atr']}  "
+                f"stop={r['stop_ref']}  target={r['target_ref']}  score={r['score_total']}  "
+                f"[{r['score_breakdown']}]"
+            )
+            obv_txt = "pos" if r["obv_slope20"] > 0 else "neg"
+            body_lines.append(
+                f"  volr={r['volr']}  pb={r['don20'] if np.isnan(r['pb']) else r['pb']}  "
+                f"don20={r['don20']}  obv_slope20={obv_txt}  turnover20={r['turnover20']:.2e}"
+            )
+            body_lines.append("  entry=next_open  exit=1d_close")
+
+    body_lines.append("\n[Rejected top]")
+    if rej_df.empty:
+        body_lines.append("(none)")
+    else:
+        for _, r in rej_df.iterrows():
+            body_lines.append(f"- {r['ticker']}  reason={r['reasons']}  score={r['score_total']}")
+
+    body_lines.append("\n[Files]")
+    body_lines.append(os.path.abspath(plan_csv_path))
+    body_lines.append(os.path.abspath(ranks_csv_path))
+
+    # YAML ブロック
+    yaml_lines = []
+    yaml_lines.append("```yaml")
+    yaml_lines.append("jpplan:")
+    yaml_lines.append(f"  date: {dt.date.today().isoformat()}")
+    yaml_lines.append(f"  regime: {'RISK_ON' if is_risk_on else 'RISK_OFF'}")
+    yaml_lines.append(f"  capital: {cfg.capital}")
+    yaml_lines.append(f"  risk_per_trade: {cfg.risk_per_trade}")
+    yaml_lines.append(f"  atr_mult_stop: {cfg.atr_mult_stop}")
+    yaml_lines.append(f"  lot_size_default: {cfg.lot_size_default}")
+    yaml_lines.append("  picks: []" if plan_df.empty else "  picks:")
+    for _, r in plan_df.iterrows():
+        obv_txt = "pos" if r["obv_slope20"] > 0 else "neg"
+        yaml_lines.append(f"    - ticker: {r['ticker']}")
+        yaml_lines.append(f"      shares: {int(r['shares'])}")
+        yaml_lines.append(f"      close: {float(r['close_ref'])}")
+        yaml_lines.append(f"      atr: {float(r['atr'])}")
+        yaml_lines.append(f"      stop: {float(r['stop_ref'])}")
+        yaml_lines.append(f"      target: {float(r['target_ref'])}")
+        yaml_lines.append(f"      score_total: {float(r['score_total'])}")
+        yaml_lines.append(f"      score_breakdown: \"{r['score_breakdown']}\"")
+        yaml_lines.append(f"      signals: {{volr: {float(r['volr'])}, pb: {('null' if np.isnan(r['pb']) else float(r['pb']))}, don20: {('null' if np.isnan(r['don20']) else float(r['don20']))}, obv_slope20: {obv_txt}}}")
+        yaml_lines.append(f"      turnover20: {float(r['turnover20'])}")
+        yaml_lines.append(f"      entry: next_open")
+        yaml_lines.append(f"      exit: 1d_close")
+    yaml_lines.append("  rejected_top: []" if rej_df.empty else "  rejected_top:")
+    for _, r in rej_df.iterrows():
+        yaml_lines.append(f"    - ticker: {r['ticker']}")
+        yaml_lines.append(f"      reason: \"{r['reasons']}\"")
+        yaml_lines.append(f"      score_total: {float(r['score_total'])}")
+    yaml_lines.append("```")
+
+    body_lines.append("\n# 機械可読ブロック（このままChatGPTに貼ってください）")
+    body_lines.extend(yaml_lines)
+    return "\n".join(body_lines)
 
 # ===== メイン =====
 def main():
+    # Logging 基本設定（環境変数 LOG_LEVEL で上書き可）
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="[%(levelname)s] %(message)s")
+
     p = argparse.ArgumentParser(description="Daily Trading Helper JP PLUS")
     p.add_argument("-c", "--config", default="config.jp.yml")
     p.add_argument("--outdir", default=None)
@@ -498,17 +562,17 @@ def main():
 
     # 休日スキップ（日本）
     if cfg.holiday_skip_jp and not _is_jp_trading_day():
-        print("[INFO] Skipping (not a JP trading day)")
+        logger.info("Skipping (not a JP trading day)")
         return
 
     start_all = dt.datetime.now()
     start = dt.date.today() - dt.timedelta(days=cfg.data_days)
     tickers = sorted(set([cfg.benchmark] + cfg.universe))
-    print(f"[INFO] Downloading: {', '.join(tickers)}  since {start}")
+    logger.info("Downloading: %s since %s", ", ".join(tickers), start)
 
     frames = download_history(tickers, start, cache_dir=cfg.cache_dir, max_age_days=cfg.cache_max_age_days)
     if cfg.benchmark not in frames or frames[cfg.benchmark].empty:
-        print("[ERROR] ベンチマークの価格系列を取得できませんでした。", file=sys.stderr)
+        logger.error("ベンチマークの価格系列を取得できませんでした。")
         sys.exit(2)
 
     is_risk_on = risk_on_regime(frames[cfg.benchmark], cfg.regime_ma)
@@ -546,90 +610,18 @@ def main():
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
     # メール本文（要約＋YAML）
-    date_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M JST")
-    body_lines = [
-        f"Regime: {'RISK_ON' if is_risk_on else 'RISK_OFF'} (bench={cfg.benchmark})   Date: {date_str}",
-        f"Capital: {cfg.capital:.0f}  Risk/Trade: {cfg.risk_per_trade*100:.1f}%  ATRx: {cfg.atr_mult_stop}  Lot: {cfg.lot_size_default}",
-        f"Universe: {len(cfg.universe)} tickers",
-        "",
-        "[Plan]"
-    ]
-    if plan_df.empty:
-        body_lines.append("No picks based on current rules.")
-    else:
-        for _, r in plan_df.iterrows():
-            body_lines.append(
-                f"- {r['ticker']}  shares={r['shares']}  close={r['close_ref']}  ATR={r['atr']}  "
-                f"stop={r['stop_ref']}  target={r['target_ref']}  score={r['score_total']}  "
-                f"[{r['score_breakdown']}]"
-            )
-            obv_txt = "pos" if r["obv_slope20"] > 0 else "neg"
-            body_lines.append(
-                f"  volr={r['volr']}  pb={r['don20'] if np.isnan(r['pb']) else r['pb']}  "
-                f"don20={r['don20']}  obv_slope20={obv_txt}  turnover20={r['turnover20']:.2e}"
-            )
-            body_lines.append("  entry=next_open  exit=1d_close")
-
-    body_lines.append("\n[Rejected top]")
-    if rej_df.empty:
-        body_lines.append("(none)")
-    else:
-        for _, r in rej_df.iterrows():
-            body_lines.append(f"- {r['ticker']}  reason={r['reasons']}  score={r['score_total']}")
-
-    body_lines.append("\n[Files]")
-    body_lines.append(os.path.abspath(plan_csv))
-    body_lines.append(os.path.abspath(ranks_csv))
-
-    # YAMLブロック
-    yaml_lines = []
-    yaml_lines.append("```yaml")
-    yaml_lines.append("jpplan:")
-    yaml_lines.append(f"  date: {dt.date.today().isoformat()}")
-    yaml_lines.append(f"  regime: {'RISK_ON' if is_risk_on else 'RISK_OFF'}")
-    yaml_lines.append(f"  capital: {cfg.capital}")
-    yaml_lines.append(f"  risk_per_trade: {cfg.risk_per_trade}")
-    yaml_lines.append(f"  atr_mult_stop: {cfg.atr_mult_stop}")
-    yaml_lines.append(f"  lot_size_default: {cfg.lot_size_default}")
-    yaml_lines.append("  picks: []" if plan_df.empty else "  picks:")
-    for _, r in plan_df.iterrows():
-        obv_txt = "pos" if r["obv_slope20"] > 0 else "neg"
-        yaml_lines.append(f"    - ticker: {r['ticker']}")
-        yaml_lines.append(f"      shares: {int(r['shares'])}")
-        yaml_lines.append(f"      close: {float(r['close_ref'])}")
-        yaml_lines.append(f"      atr: {float(r['atr'])}")
-        yaml_lines.append(f"      stop: {float(r['stop_ref'])}")
-        yaml_lines.append(f"      target: {float(r['target_ref'])}")
-        yaml_lines.append(f"      score_total: {float(r['score_total'])}")
-        yaml_lines.append(f"      score_breakdown: \"{r['score_breakdown']}\"")
-        yaml_lines.append(f"      signals: {{volr: {float(r['volr'])}, pb: {('null' if np.isnan(r['pb']) else float(r['pb']))}, don20: {('null' if np.isnan(r['don20']) else float(r['don20']))}, obv_slope20: {obv_txt}}}")
-        yaml_lines.append(f"      turnover20: {float(r['turnover20'])}")
-        yaml_lines.append(f"      entry: next_open")
-        yaml_lines.append(f"      exit: 1d_close")
-    yaml_lines.append("  rejected_top: []" if rej_df.empty else "  rejected_top:")
-    for _, r in rej_df.iterrows():
-        yaml_lines.append(f"    - ticker: {r['ticker']}")
-        yaml_lines.append(f"      reason: \"{r['reasons']}\"")
-        yaml_lines.append(f"      score_total: {float(r['score_total'])}")
-    yaml_lines.append("```")
-
-    body_lines.append("\n# 機械可読ブロック（このままChatGPTに貼ってください）")
-    body_lines.extend(yaml_lines)
-    body = "\n".join(body_lines)
+    body = format_daily_email(cfg, is_risk_on, plan_df, rej_df, plan_csv, ranks_csv)
 
     if not args.no_email and write_outputs:
-        try:
-            _send_email(cfg.email_enabled, cfg.email_to, cfg.email_subject, body)
-        except Exception:
-            send_email(cfg, cfg.email_subject, body)
+        _send_email(cfg.email_enabled, cfg.email_to, cfg.email_subject, body)
 
     # コンソール要約
-    print("\n=== SUMMARY ===")
-    print(f"Regime: {'RISK_ON' if is_risk_on else 'RISK_OFF'} (benchmark: {cfg.benchmark})")
+    logger.info("\n=== SUMMARY ===")
+    logger.info("Regime: %s (benchmark: %s)", "RISK_ON" if is_risk_on else "RISK_OFF", cfg.benchmark)
     if plan_df.empty:
-        print("No picks for tomorrow based on current regime/rules.")
+        logger.info("No picks for tomorrow based on current regime/rules.")
     else:
-        print(plan_df.to_string(index=False))
+        logger.info("\n%s", plan_df.to_string(index=False))
 
     # 履歴に追記（再エントリー制御用）
     if write_outputs:
@@ -664,8 +656,8 @@ def main():
         except Exception:
             pass
 
-    print(f"\nSaved:\n - {plan_csv}\n - {ranks_csv}\n - {latest_json}")
-    print("\n※ 実売買前に、取引コスト・税制・流動性・決算/材料・約定方法等を必ずご確認ください。")
+    logger.info("\nSaved:\n - %s\n - %s\n - %s", plan_csv, ranks_csv, latest_json)
+    logger.info("\n※ 実売買前に、取引コスト・税制・流動性・決算/材料・約定方法等を必ずご確認ください。")
 
 if __name__ == "__main__":
     main()
