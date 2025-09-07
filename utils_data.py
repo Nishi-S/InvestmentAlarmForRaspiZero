@@ -6,6 +6,9 @@ import datetime as dt
 from typing import Dict, List, Optional
 
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _cache_path(cache_dir: str, ticker: str) -> str:
@@ -60,6 +63,7 @@ def download_with_cache(
     backoff_sec: float = 1.5,
 ) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
+    missing: List[str] = []
     for t in tickers:
         # Try fresh download with retries
         df = None
@@ -82,8 +86,11 @@ def download_with_cache(
                 cached = load_cache(cache_dir, t, max_age_days=None)
                 if cached is not None:
                     out[t] = cached
+                else:
+                    missing.append(t)
         else:
             out[t] = df
             save_cache(cache_dir, t, df)
+    if missing:
+        logger.warning("Data unavailable for tickers (no download and no cache): %s", ", ".join(sorted(missing)))
     return out
-
