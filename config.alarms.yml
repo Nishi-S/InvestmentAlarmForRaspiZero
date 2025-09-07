@@ -5,6 +5,8 @@ data_days: 260
 
 # 出力先
 outdir: reports_alarms
+cache_dir: cache
+cache_max_age_days: 2
 
 # 米10年金利（US10Y=^TNX/10）
 us10y_cross_up_hard: 4.60
@@ -22,8 +24,29 @@ ratio_short: SMH
 ratio_long: XLK
 ratio_sma_days: 50
 
-# メール送信（任意）
+# 追加の比率シグナル（任意）
+ratio_signals:
+  - { short: HYG, long: IEF, sma_days: 50, name: "HYG/IEF_SMA50_DOWN", severity: INFO }
+  - { short: RSP, long: SPY, sma_days: 50, name: "RSP/SPY_SMA50_DOWN", severity: INFO }
+  - { short: IWM, long: QQQ, sma_days: 50, name: "IWM/QQQ_SMA50_DOWN", severity: INFO }
+
+# ベースライン（任意）
+spy_sma200_down: true
+topix_t1306_sma200_down: false
+
+# 休日スキップ（米国）
+holiday_skip_us: true
+
+# 通知
 email_enabled: false
 email_to: "you@example.com"
 email_subject: "INVESTMENT ALARM"
 
+# 状態管理
+notify_on_change_only: true
+cooldown_hours: 12
+state_file: reports_alarms/alarms_state.json
+
+# デイリープランの要約を同報
+digest_include_daily: true
+daily_latest_json: reports/plan_latest.json

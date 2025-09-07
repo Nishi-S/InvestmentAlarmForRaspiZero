@@ -37,6 +37,7 @@
   - `sudo timedatectl set-timezone Asia/Tokyo`
   - `daily-jp.timer`: 平日 15:10 / `investment-alarms.timer`: 平日 08:05 に実行
   - オフライン時も再実行するため `Persistent=true` を設定済み
+  - ユニットは hardening 設定（`ProtectSystem=full` 等）と `Restart=on-failure` を付与済み
 
 ## イベント除外（任意）
 - `events_ignore.csv` に `ticker,until,reason` を記入（until は YYYY-MM-DD）。
@@ -49,6 +50,16 @@
 
 > ※メール連携を使えば、毎朝あなたが「デイリーJP」と送るだけで、こちらがGmailから直近の要約を取得して最終判断に落とし込めます（初回のみ連携OKの合図が必要）。
 
+### 追加オプション（デイリー）
+- `--outdir`: 出力先を上書き
+- `--no-email`: メール送信を抑止
+- `--dry-run`: 書き込みと通知を抑止（計算のみ）
+- 休日スキップ: `holiday_skip_jp: true`（`jpholiday` があれば日本の祝日も除外）
+- キャッシュ: `cache_dir`, `cache_max_age_days`（`yfinance` の取得を補助）
+- サイジング: `min_notional_jpy`, `notional_cap_per_ticker_jpy`, `commission_per_trade_jpy`
+- 再エントリー抑止: `reentry_cooloff_days`（`reports/picks_history.json` を参照）
+- エグジット表現: `hold_days`, `trailing_stop_mult`（後者>0でトレール表記）
+
 ## 長期投資向けアラーム（追加機能）
 - 対象アラーム（デフォルト値）
   - 米10年金利（US10Y）: 4.60% 上抜け（Hard）／ 3.90% 割れ（Hard）
@@ -60,6 +71,18 @@
 1. `config.alarms.yml` を必要に応じて編集（しきい値、メール宛先 等）
 2. 実行: `python investment_alarms.py -c config.alarms.yml`
 3. 出力: `reports_alarms/alarms_*.csv`, `reports_alarms/alarms_latest.json`
+
+### 追加機能（アラーム）
+- 状態管理: `notify_on_change_only`, `cooldown_hours`, `state_file`
+- 休日スキップ（米国）: `holiday_skip_us`（`pandas-market-calendars` があれば取引所休場）
+- 比率/ベースラインの拡張: `ratio_signals`, `spy_sma200_down`, `topix_t1306_sma200_down`
+- デイリー要約の同報: `digest_include_daily: true`（`reports/plan_latest.json` を取り込み）
+- キャッシュ: `cache_dir`, `cache_max_age_days`
+
+### 追加オプション（アラーム）
+- `--outdir`, `--no-email`, `--dry-run` をサポート
+
+実行後、`reports/` および `reports_alarms/` に `status.html` と `metrics.prom`（Prometheus テキストフォーマット）が生成されます。
 
 メモ:
 - US10Y は Yahoo の `^TNX` を使用し、値はパーセント換算のため `Close/10` として扱います。
@@ -76,3 +99,8 @@
 - `config.alarms.yml` で `email_enabled: true`、`email_to:` を設定。
 - 環境変数 `EMAIL_USER`（送信元Gmail）と `EMAIL_PASS`（アプリパスワード）を設定。
 - アラームがトリガーされた内容のサマリをメール送信します（トリガーが無い場合は「No new triggers.」）。
+
+## 開発
+- 依存関係: `requirements.txt`
+- テスト: `pytest -q`（ネットワークアクセス不要）
+- CI: GitHub Actions（`python 3.10/3.11`）でテスト実行

@@ -11,7 +11,19 @@ ExecStart=%h/InvestmentAlarmForRaspiZero/.venv/bin/python -u investment_alarms.p
 Nice=10
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+Restart=on-failure
 
 [Install]
 WantedBy=default.target
-
