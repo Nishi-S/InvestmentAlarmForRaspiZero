@@ -130,6 +130,27 @@ def _adj_close(df: pd.DataFrame) -> pd.Series:
     return df["Close"]
 
 
+def _as_col(x: pd.Series | pd.DataFrame, name: str) -> pd.DataFrame:
+    """Robustly return a single-column DataFrame named `name` from Series/DataFrame.
+    Handles environments where upstream returns DataFrame unexpectedly.
+    """
+    if isinstance(x, pd.Series):
+        return x.to_frame(name)
+    if isinstance(x, pd.DataFrame):
+        # Prefer standard close columns if present
+        for c in ("Adj Close", "Close", "close", "adjclose"):
+            if c in x.columns:
+                return x[[c]].rename(columns={c: name})
+        # Single-column case
+        if x.shape[1] == 1:
+            return x.rename(columns={x.columns[0]: name})
+        # Fallback to first column
+        return x.iloc[:, [0]].rename(columns={x.columns[0]: name})
+    # Last resort: coerce to Series
+    s = pd.Series(x)
+    return s.to_frame(name)
+
+
 # ==== Alarms ====
 def evaluate_alarms(cfg: AlarmConfig, frames: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
     now_ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -224,8 +245,8 @@ def evaluate_alarms(cfg: AlarmConfig, frames: Dict[str, pd.DataFrame]) -> Dict[s
     # 4) SMH/XLK ratio vs SMA50
     sh = cfg.ratio_short; lg = cfg.ratio_long
     if (sh in frames) and (lg in frames):
-        df_sh = _adj_close(frames[sh]).rename("short")
-        df_lg = _adj_close(frames[lg]).rename("long")
+        df_sh = _as_col(_adj_close(frames[sh]), "short")
+        df_lg = _as_col(_adj_close(frames[lg]), "long")
         df = pd.concat([df_sh, df_lg], axis=1, join="inner").dropna()
         if not df.empty:
             ratio = (df["short"] / df["long"]).rename("ratio")
@@ -254,8 +275,8 @@ def evaluate_alarms(cfg: AlarmConfig, frames: Dict[str, pd.DataFrame]) -> Dict[s
         name = sig.get("name") or f"{sh}/{lg}_SMA{sma_days}_DOWN"
         sev = sig.get("severity", "INFO")
         if (sh in frames) and (lg in frames):
-            df_sh = _adj_close(frames[sh]).rename("short")
-            df_lg = _adj_close(frames[lg]).rename("long")
+            df_sh = _as_col(_adj_close(frames[sh]), "short")
+            df_lg = _as_col(_adj_close(frames[lg]), "long")
             df = pd.concat([df_sh, df_lg], axis=1, join="inner").dropna()
             if not df.empty:
                 ratio = (df["short"] / df["long"]).rename("ratio")
