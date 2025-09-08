@@ -122,6 +122,19 @@ def macd_hist(close: pd.Series) -> pd.Series:
     signal = macd.ewm(span=9, adjust=False).mean()
     return macd - signal
 
+# 補助: 返り値を安全に Series 化して、指定 index に合わせる
+def _ensure_series(x: Any, index: pd.Index) -> pd.Series:
+    try:
+        if isinstance(x, pd.Series):
+            return x.reindex(index)
+        if isinstance(x, pd.DataFrame):
+            if x.shape[1] >= 1:
+                return x.iloc[:, 0].reindex(index)
+        s = pd.Series(x, index=index)
+        return s
+    except Exception:
+        return pd.Series(index=index, dtype=float)
+
 # ===== 設定 =====
 @dataclass
 class Config:
@@ -874,18 +887,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-def _ensure_series(x: Any, index: pd.Index) -> pd.Series:
-    """返り値を安全に Series 化して、指定 index に合わせる。
-    DataFrame が来た場合は先頭列を使用。
-    """
-    try:
-        if isinstance(x, pd.Series):
-            return x.reindex(index)
-        if isinstance(x, pd.DataFrame):
-            if x.shape[1] >= 1:
-                return x.iloc[:, 0].reindex(index)
-        # スカラや配列の場合
-        s = pd.Series(x, index=index)
-        return s
-    except Exception:
-        return pd.Series(index=index, dtype=float)
