@@ -29,3 +29,4 @@ def send_email(email_enabled: bool, email_to: Optional[str], subject: str, body:
 
 
 __all__ = ["send_email"]
+

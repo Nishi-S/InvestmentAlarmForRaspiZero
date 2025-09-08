@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 
 # Ensure repo root on path for direct module imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from investment_alarms import evaluate_alarms, AlarmConfig, should_send_email
+from investment_alarm.investment_alarms import evaluate_alarms, AlarmConfig, should_send_email
 
 
 def df_from_series(values, start=dt.date(2024, 1, 1), col="Close"):

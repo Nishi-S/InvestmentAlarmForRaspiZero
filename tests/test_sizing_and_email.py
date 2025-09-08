@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 
 # Ensure repo root on path for direct module imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from daily_system_jp_plus import (
+from investment_alarm.daily_system_jp_plus import (
     build_scores,
     decide_candidates,
     Config,
@@ -125,4 +125,3 @@ def test_format_daily_email_contains_sections():
     if not plan_df.empty:
         assert plan_df.iloc[0]["ticker"] in body
     assert os.path.abspath(plan_csv) in body and os.path.abspath(ranks_csv) in body
-
