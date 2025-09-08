@@ -9,6 +9,7 @@ Type=oneshot
 User=root
 WorkingDirectory=/home/nishi/InvestmentAlarmForRaspiZero
 EnvironmentFile=-/etc/jpplus.env
+Environment=PYTHONPATH=/home/nishi/InvestmentAlarmForRaspiZero/src
 ExecStart=/home/nishi/InvestmentAlarmForRaspiZero/.venv/bin/python -u -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml
 Nice=10
 StandardOutput=journal

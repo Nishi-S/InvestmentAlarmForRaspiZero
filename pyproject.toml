@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investment-alarm"
+version = "0.1.0"
+description = "Daily JP plan and long-term investment alarms (Raspberry Pi friendly)"
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{ name = "nishi" }]
+license = { text = "Proprietary" }
+
+# 依存関係は開発用 requirements.txt を利用するため省略（必要なら移行可）
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["investment_alarm*"]
+
+[project.scripts]
+daily-jp = "investment_alarm.daily_system_jp_plus:main"
+investment-alarms = "investment_alarm.investment_alarms:main"
+

@@ -430,7 +430,7 @@ def main():
         logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="[%(levelname)s] %(message)s")
 
     ap = argparse.ArgumentParser(description="Long-term Investment Alarms")
-    ap.add_argument("-c", "--config", default="config.alarms.yml")
+    ap.add_argument("-c", "--config", default="config/config.alarms.yml")
     ap.add_argument("--outdir", default=None, help="override output dir")
     ap.add_argument("--no-email", action="store_true")
     ap.add_argument("--dry-run", action="store_true")

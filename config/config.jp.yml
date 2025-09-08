@@ -154,3 +154,25 @@ w_momo: 0.25
 w_volume: 0.20
 w_breakout: 0.15
 w_structure: 0.10
+
+# 追加オプション（拡張）
+# 手数料/スリッページ（仮定値）
+commission_per_trade_jpy: 0.0
+slippage_bps: 0.0
+
+# 分散制約・相関
+sector_map_csv: config/sector_map.csv
+sector_max_fraction: 1.0   # 例: 0.5 で採用中の50%まで
+corr_max: 1.0              # 例: 0.8 以上の高相関は回避
+corr_lookback_days: 20
+
+# ポートフォリオ配分（有効化する場合）
+risk_total_pct: 0.0        # 例: 0.01 = 資金の1%（0は無効）
+risk_allocation_mode: per_trade  # or "portfolio"
+
+# リスクオフ時も採用する場合（防御モード）
+allow_pick_in_risk_off: false
+risk_off_risk_scale: 0.5
+
+# 追加スコア重み
+w_strength: 0.05

@@ -11,33 +11,75 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _cache_path(cache_dir: str, ticker: str) -> str:
+def _cache_path(cache_dir: str, ticker: str, ext: str = "pkl.gz") -> str:
+    """キャッシュファイルパス（拡張子可変）。
+    既定は pickle（gzip）: .pkl.gz
+    CSV 互換読取用には ext="csv" を指定。
+    """
     safe = ticker.replace("/", "_")
-    return os.path.join(cache_dir, f"{safe}.csv")
+    return os.path.join(cache_dir, f"{safe}.{ext}")
 
 
 def load_cache(cache_dir: str, ticker: str, max_age_days: Optional[int] = None) -> Optional[pd.DataFrame]:
-    path = _cache_path(cache_dir, ticker)
-    if not os.path.exists(path):
-        return None
+    path_pkl = _cache_path(cache_dir, ticker, "pkl.gz")
+    path_csv = _cache_path(cache_dir, ticker, "csv")
+
+    def _is_stale(p: str) -> bool:
+        if max_age_days is None:
+            return False
+        mtime = os.path.getmtime(p)
+        age_days = (time.time() - mtime) / 86400.0
+        return age_days > max_age_days
     try:
-        if max_age_days is not None:
-            mtime = os.path.getmtime(path)
-            age_days = (time.time() - mtime) / 86400.0
-            if age_days > max_age_days:
-                return None
-        df = pd.read_csv(path, parse_dates=True, index_col=0)
-        # Ensure columns are in expected dtype
-        return df
+        # 1) pickle（優先）
+        if os.path.exists(path_pkl) and not _is_stale(path_pkl):
+            try:
+                df = pd.read_pickle(path_pkl, compression="gzip")
+                return df
+            except Exception:
+                pass
+        # 2) CSV（後方互換）
+        if os.path.exists(path_csv) and not _is_stale(path_csv):
+            try:
+                # pandas 2.x: 明示的に日付フォーマットを指定
+                # 既存キャッシュには MultiIndex 風の2行ヘッダ（2行目が "Ticker,..."）が含まれる場合がある。
+                # その場合は header=[0,1] + skiprows=[2] で読み取り、列は1階層に落とす。
+                with open(path_csv, "r", encoding="utf-8") as f:
+                    _first = f.readline()
+                    _second = f.readline()
+                if _second.startswith("Ticker,"):
+                    df = pd.read_csv(
+                        path_csv,
+                        header=[0, 1],
+                        index_col=0,
+                        parse_dates=[0],
+                        date_format="%Y-%m-%d",
+                        skiprows=[2],
+                    )
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                else:
+                    df = pd.read_csv(
+                        path_csv,
+                        index_col=0,
+                        parse_dates=[0],
+                        date_format="%Y-%m-%d",
+                    )
+                return df
+            except Exception:
+                pass
+        return None
     except Exception:
         return None
 
 
 def save_cache(cache_dir: str, ticker: str, df: pd.DataFrame) -> None:
     os.makedirs(cache_dir, exist_ok=True)
-    path = _cache_path(cache_dir, ticker)
+    # 既定は pickle(gzip)。
+    path = _cache_path(cache_dir, ticker, "pkl.gz")
     try:
-        df.to_csv(path)
+        # pickle は型・index をそのまま保持し、高速にロード可
+        df.to_pickle(path, compression="gzip")
     except Exception:
         pass
 
@@ -65,7 +107,18 @@ def download_with_cache(
     out: Dict[str, pd.DataFrame] = {}
     missing: List[str] = []
     for t in tickers:
-        # Try fresh download with retries
+        # まず新鮮なキャッシュがあれば即使用（ネットワーク回避）
+        cached_fresh = load_cache(cache_dir, t, max_age_days=max_age_days)
+        if cached_fresh is not None:
+            out[t] = cached_fresh
+            # 移行のため pickle に保存（CSVの場合）
+            try:
+                save_cache(cache_dir, t, cached_fresh)
+            except Exception:
+                pass
+            continue
+
+        # 新鮮キャッシュが無い場合のみダウンロードを試行
         df = None
         for i in range(max(1, retries + 1)):
             try:
@@ -76,22 +129,21 @@ def download_with_cache(
                 df = None
             time.sleep(backoff_sec * (i + 1))
 
-        if df is None or df.empty:
-            # Fallback to cache
-            cached = load_cache(cache_dir, t, max_age_days=max_age_days)
-            if cached is not None:
-                out[t] = cached
-            else:
-                # last resort: try cache without staleness check
-                cached = load_cache(cache_dir, t, max_age_days=None)
-                if cached is not None:
-                    out[t] = cached
-                else:
-                    missing.append(t)
-        else:
+        if df is not None and not df.empty:
             out[t] = df
             save_cache(cache_dir, t, df)
+            continue
+
+        # ダウンロード失敗時は古いキャッシュでも採用
+        cached_any = load_cache(cache_dir, t, max_age_days=None)
+        if cached_any is not None:
+            out[t] = cached_any
+            try:
+                save_cache(cache_dir, t, cached_any)
+            except Exception:
+                pass
+        else:
+            missing.append(t)
     if missing:
         logger.warning("Data unavailable for tickers (no download and no cache): %s", ", ".join(sorted(missing)))
     return out
-

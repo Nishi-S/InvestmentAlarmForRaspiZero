@@ -12,6 +12,7 @@ Daily Trading Helper JP PLUS (1-day cycle) — drop-in replacement 2025-09-06
 """
 
 import os
+import time
 import logging
 import sys
 import math
@@ -19,7 +20,7 @@ import json
 import argparse
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,23 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
                     (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["High"]; low = df["Low"]; close = df["Close"]
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    tr1 = (high - low).abs()
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_ = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / (atr_ + 1e-9))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / (atr_ + 1e-9))
+    dx = (100 * (plus_di - minus_di).abs() / ((plus_di + minus_di) + 1e-9)).fillna(0.0)
+    adx_ = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx_
+
 def rsi_wilder(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     up = delta.clip(lower=0)
@@ -97,6 +115,13 @@ def bollinger_percent_b(close: pd.Series, window: int = 20, k: float = 2.0) -> p
     width = (upper - lower).replace(0, np.nan)
     return (close - lower) / width
 
+def macd_hist(close: pd.Series) -> pd.Series:
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd - signal
+
 # ===== 設定 =====
 @dataclass
 class Config:
@@ -130,6 +155,7 @@ class Config:
     min_notional_jpy: float = 0.0
     notional_cap_per_ticker_jpy: float = 1e18
     commission_per_trade_jpy: float = 0.0
+    slippage_bps: float = 0.0
     # 再エントリークールオフ
     reentry_cooloff_days: int = 0
     picks_history_file: str = "reports/picks_history.json"
@@ -142,6 +168,18 @@ class Config:
     w_volume: float = 0.20
     w_breakout: float = 0.15
     w_structure: float = 0.10
+    w_strength: float = 0.05
+    # 分散制約・相関
+    sector_map_csv: Optional[str] = "config/sector_map.csv"
+    sector_max_fraction: float = 1.0
+    corr_max: float = 1.0
+    corr_lookback_days: int = 20
+    # ポートフォリオ配分
+    risk_total_pct: float = 0.0
+    risk_allocation_mode: str = "per_trade"  # or "portfolio"
+    # リスクオフ採用
+    allow_pick_in_risk_off: bool = False
+    risk_off_risk_scale: float = 0.5
 
 def load_config(path: str) -> Config:
     try:
@@ -200,6 +238,13 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["RSI2"] = rsi_wilder(out["Close"], 2)
     out["RET5"] = out["Close"].pct_change(5)
     out["RET20"] = out["Close"].pct_change(20)
+    # 追加指標
+    out["DIST52H"] = np.nan
+    if len(out) >= 60:
+        rollmax = out["Close"].rolling(252, min_periods=60).max()
+        out["DIST52H"] = out["Close"] / (rollmax + 1e-9)
+    out["ADX14"] = _ensure_series(adx(out, 14), out.index)
+    out["MACD_HIST"] = _ensure_series(macd_hist(out["Close"]), out.index)
     return out
 
 # ===== スコアリング =====
@@ -238,12 +283,22 @@ def score_row(row: Dict[str, float], med_atr: float) -> Dict[str, float]:
         ratio = row["ATR"] / med_atr
         structure = clamp01(1.0 - min(abs(np.log(ratio)), 2.0) / 2.0)
 
+    # 追加: 強さ（52週高近さ、ADX、MACDヒスト）
+    d52 = row.get("DIST52H", np.nan)
+    adx14 = row.get("ADX14", np.nan)
+    mh = row.get("MACD_HIST", np.nan)
+    s_d52 = 0.5 if np.isnan(d52) else clamp01(float(d52))
+    s_adx = 0.5 if np.isnan(adx14) else clamp01(float(adx14) / 50.0)
+    s_mh = 0.5 if np.isnan(mh) else (0.7 if mh > 0 else 0.3)
+    strength = 0.5 * s_d52 + 0.3 * s_adx + 0.2 * s_mh
+
     return {
         "trend": float(trend),
         "momo": float(momo),
         "volume": float(volume),
         "breakout": float(breakout),
         "structure": float(structure),
+        "strength": float(strength),
     }
 
 def build_scores(cfg: Config, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -280,6 +335,9 @@ def build_scores(cfg: Config, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         rsi2  = feats["RSI2"].iloc[-1]
         ret5  = float(np.asarray(feats["RET5"].iloc[-1]).item())
         ret20 = float(np.asarray(feats["RET20"].iloc[-1]).item())
+        dist52 = feats["DIST52H"].iloc[-1] if "DIST52H" in feats.columns else np.nan
+        adx14  = feats["ADX14"].iloc[-1] if "ADX14" in feats.columns else np.nan
+        mh     = feats["MACD_HIST"].iloc[-1] if "MACD_HIST" in feats.columns else np.nan
 
         ret5_z  = (ret5  - ret5_mean)  / ret5_std
         ret20_z = (ret20 - ret20_mean) / ret20_std
@@ -293,6 +351,9 @@ def build_scores(cfg: Config, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             "OBV_SLOPE20": float(obvs) if pd.notna(obvs) else np.nan,
             "RSI2": float(rsi2) if pd.notna(rsi2) else np.nan,
             "RET5_Z": float(ret5_z), "RET20_Z": float(ret20_z),
+            "DIST52H": float(dist52) if pd.notna(dist52) else np.nan,
+            "ADX14": float(adx14) if pd.notna(adx14) else np.nan,
+            "MACD_HIST": float(mh) if pd.notna(mh) else np.nan,
         }
         s = score_row(row_vals, med_atr)
 
@@ -318,10 +379,11 @@ def build_scores(cfg: Config, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             "score_volume": round(s["volume"], 4),
             "score_breakout": round(s["breakout"], 4),
             "score_structure": round(s["structure"], 4),
+            "strength": round(s.get("strength", 0.0), 4),
             "score_total": round(
                 cfg.w_trend * s["trend"] + cfg.w_momo * s["momo"] +
                 cfg.w_volume * s["volume"] + cfg.w_breakout * s["breakout"] +
-                cfg.w_structure * s["structure"], 4
+                cfg.w_structure * s["structure"] + cfg.w_strength * s.get("strength", 0.0), 4
             ),
             "turnover20": round(turnover, 2),
         })
@@ -329,8 +391,8 @@ def build_scores(cfg: Config, frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("score_total", ascending=False)
 
 # ===== イベント除外 =====
-def load_event_block(cfg: Config) -> Dict[str, dt.date]:
-    block_until = {}
+def load_event_block(cfg: Config) -> Dict[str, Tuple[Optional[dt.date], dt.date]]:
+    block_range: Dict[str, Tuple[Optional[dt.date], dt.date]] = {}
     if cfg.events_csv and os.path.exists(cfg.events_csv):
         try:
             df = pd.read_csv(cfg.events_csv)
@@ -339,19 +401,21 @@ def load_event_block(cfg: Config) -> Dict[str, dt.date]:
                     tkr = str(r["ticker"]).strip()
                     if "until" in r and not pd.isna(r["until"]):
                         until = dt.datetime.strptime(str(r["until"]), "%Y-%m-%d").date()
+                        start = None
+                        if cfg.event_block_days_before and cfg.event_block_days_before > 0:
+                            start = until - dt.timedelta(days=cfg.event_block_days_before)
                     elif "date" in r and not pd.isna(r["date"]):
                         ev = dt.datetime.strptime(str(r["date"]), "%Y-%m-%d").date()
+                        start = ev - dt.timedelta(days=cfg.event_block_days_before)
                         until = ev + dt.timedelta(days=cfg.event_block_days_after)
-                        start_block = ev - dt.timedelta(days=cfg.event_block_days_before)
-                        # we will only store until here; main uses today to compare
                     else:
                         continue
-                    block_until[tkr] = until
+                    block_range[tkr] = (start, until)
                 except Exception:
                     continue
         except Exception as e:
             logger.warning("events_csv 読み込み失敗: %s", e)
-    return block_until
+    return block_range
 
 def load_reentry_block(cfg: Config) -> Dict[str, dt.date]:
     if cfg.reentry_cooloff_days <= 0:
@@ -381,14 +445,38 @@ def load_reentry_block(cfg: Config) -> Dict[str, dt.date]:
         return {}
 
 # ===== 候補選定（却下理由つき） =====
-def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, block_until: Dict[str, dt.date]):
+def decide_candidates(
+    cfg: Config,
+    score_df: pd.DataFrame,
+    is_risk_on: bool,
+    block_ranges: Optional[Dict[str, Tuple[Optional[dt.date], dt.date]]] = None,
+    corr: Optional[Dict[str, Dict[str, float]]] = None,
+    block_until: Optional[Dict[str, dt.date]] = None,
+):
     today = dt.date.today()
     if score_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    pool = cfg.risk_on_assets if is_risk_on else cfg.defensive_assets
-    if not pool:
-        pool = cfg.universe if is_risk_on else []
+    # 互換: 古い引数 block_until の対応
+    if block_ranges is None:
+        if block_until:
+            block_ranges = {k: (None, v) for k, v in block_until.items()}
+        else:
+            block_ranges = {}
+
+    if is_risk_on:
+        pool = cfg.risk_on_assets or cfg.universe
+    else:
+        pool = cfg.defensive_assets if cfg.allow_pick_in_risk_off else []
+
+    # セクターマップを一度だけ読み込む（高速化）
+    sector_map = None
+    try:
+        if cfg.sector_map_csv and os.path.exists(cfg.sector_map_csv):
+            sm = pd.read_csv(cfg.sector_map_csv)
+            sector_map = {str(x.get('ticker')).strip(): str(x.get('sector') or 'UNKNOWN').strip() for _, x in sm.iterrows()}
+    except Exception:
+        sector_map = None
 
     filt = []
     for _, r in score_df.iterrows():
@@ -398,63 +486,144 @@ def decide_candidates(cfg: Config, score_df: pd.DataFrame, is_risk_on: bool, blo
         reasons = []
         if r["turnover20"] < cfg.min_turnover_jpy:
             reasons.append(f"low_turnover<{cfg.min_turnover_jpy:.0f}")
-        if t in block_until and today <= block_until[t]:
-            reasons.append(f"event_block_until {block_until[t]}")
+        if t in block_ranges:
+            start, until = block_ranges[t]
+            if (until and today <= until) and (start is None or today >= start):
+                reasons.append(f"event_block_until {until}")
         if (r["close"] < r["ema20"]) or (r["close"] < r["ema50"]) or (r["close"] < r["sma100"]):
             reasons.append("below_MAs")
-        filt.append((t, r, reasons))
+        # sector map（事前に読み込んだ dict を参照）
+        sec = sector_map.get(t, 'UNKNOWN') if sector_map else 'UNKNOWN'
+        filt.append((t, r, reasons, sec))
 
-    kept = [ (t, r, reasons) for (t, r, reasons) in filt if len(reasons) == 0 ]
+    kept = [ (t, r, reasons, sec) for (t, r, reasons, sec) in filt if len(reasons) == 0 ]
     kept_sorted = sorted(kept, key=lambda x: x[1]["score_total"], reverse=True)
-    picks = kept_sorted[: cfg.top_k]
+    # diversification: sector cap and corr
+    picks = []
+    sector_counts: Dict[str, int] = {}
+    sector_cap = max(1, int(np.ceil(cfg.sector_max_fraction * max(cfg.top_k, 1)))) if cfg.sector_max_fraction < 1.0 else max(cfg.top_k, 10**9)
+    for t, r, reasons, sec in kept_sorted:
+        if len(picks) >= cfg.top_k:
+            break
+        if sector_counts.get(sec, 0) >= sector_cap:
+            continue
+        ok_corr = True
+        if corr and cfg.corr_max < 1.0 and picks:
+            for pt, pr, _, psec in picks:
+                c = None
+                try:
+                    c = corr.get(t, {}).get(pt, None)
+                    if c is None:
+                        c = corr.get(pt, {}).get(t, None)
+                except Exception:
+                    c = None
+                if c is not None and c > cfg.corr_max:
+                    ok_corr = False
+                    break
+        if not ok_corr:
+            continue
+        picks.append((t, r, reasons, sec))
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
 
     plan_rows = []
-    for t, r, _ in picks:
-        risk_budget = cfg.capital * cfg.risk_per_trade
-        risk_per_share = cfg.atr_mult_stop * max(r["atr"], 1e-6)
-        raw_shares = math.floor(risk_budget / risk_per_share)
-        lot = cfg.lot_size_map.get(t, cfg.lot_size_default) if cfg.lot_size_default else 1
-        shares = max((raw_shares // max(lot, 1)) * max(lot, 1), 0)
-        # 最低約定金額を満たすよう調整
-        if cfg.min_notional_jpy > 0 and r["close"] * shares < cfg.min_notional_jpy:
-            need = int(math.ceil(cfg.min_notional_jpy / max(r["close"], 1e-6)))
-            shares = max((need // max(lot, 1)) * max(lot, 1), shares)
-        # ティッカー上限
-        if cfg.notional_cap_per_ticker_jpy < 1e17:
-            cap_shares = int(math.floor(cfg.notional_cap_per_ticker_jpy / max(r["close"], 1e-6)))
-            cap_shares = max((cap_shares // max(lot, 1)) * max(lot, 1), 0)
-            shares = min(shares, cap_shares)
-        stop = r["close"] - cfg.atr_mult_stop * r["atr"]
-        target = r["close"] + 3.0 * r["atr"]
-
-        plan_rows.append({
-            "date": today.isoformat(),
-            "ticker": t,
-            "regime": "RISK_ON" if is_risk_on else "RISK_OFF",
-            "close_ref": float(r["close"]),
-            "atr": float(r["atr"]),
-            "stop_ref": round(float(stop), 4),
-            "target_ref": round(float(target), 4),
-            "shares": int(shares),
-            "notional": round(shares * float(r["close"]), 2),
-            "risk_per_trade": cfg.risk_per_trade,
-            "atr_mult_stop": cfg.atr_mult_stop,
-            "entry_plan": "next_open",
-            "exit_plan": ("trail" if cfg.trailing_stop_mult and cfg.trailing_stop_mult > 0 else f"{cfg.hold_days}d_close"),
-            "score_total": float(r["score_total"]),
-            "score_breakdown": f"T{r['score_trend']:.2f}|M{r['score_momo']:.2f}|V{r['score_volume']:.2f}|B{r['score_breakout']:.2f}|S{r['score_structure']:.2f}",
-            "volr": float(r["volr"]),
-            "pb": float(r["pb"]) if not np.isnan(r["pb"]) else np.nan,
-            "don20": float(r["don20"]) if not np.isnan(r["don20"]) else np.nan,
-            "obv_slope20": float(r["obv_slope20"]),
-            "turnover20": float(r["turnover20"]),
-        })
+    risk_scale = 1.0 if is_risk_on else (cfg.risk_off_risk_scale if cfg.allow_pick_in_risk_off else 0.0)
+    if cfg.risk_allocation_mode == "portfolio" and cfg.risk_total_pct > 0 and len(picks) > 0:
+        total_budget = max(cfg.capital * cfg.risk_total_pct * risk_scale - 2.0 * cfg.commission_per_trade_jpy * len(picks), 0.0)
+        # weights = 1/ATR（低ボラ優遇）
+        weights = []
+        rps_list = []
+        for t, r, _, _ in picks:
+            w = 1.0 / max(float(r["atr"]), 1e-6)
+            weights.append(max(w, 1e-9))
+            rps = cfg.atr_mult_stop * max(float(r["atr"]), 1e-6) + (cfg.slippage_bps / 10000.0) * float(r["close"]) * 2.0
+            rps_list.append(rps)
+        wsum = sum(weights)
+        for (t, r, _, sec), w, rps in zip(picks, weights, rps_list):
+            rb = total_budget * (w / wsum)
+            lot = cfg.lot_size_map.get(t, cfg.lot_size_default) if cfg.lot_size_default else 1
+            raw_shares = int(max(math.floor(rb / max(rps, 1e-9)), 0))
+            shares = max((raw_shares // max(lot, 1)) * max(lot, 1), 0)
+            # 最低約定金額
+            if cfg.min_notional_jpy > 0 and float(r["close"]) * shares < cfg.min_notional_jpy:
+                need = int(math.ceil(cfg.min_notional_jpy / max(float(r["close"]), 1e-6)))
+                shares = max((need // max(lot, 1)) * max(lot, 1), shares)
+            # ティッカー上限
+            if cfg.notional_cap_per_ticker_jpy < 1e17:
+                cap_shares = int(math.floor(cfg.notional_cap_per_ticker_jpy / max(float(r["close"]), 1e-6)))
+                cap_shares = max((cap_shares // max(lot, 1)) * max(lot, 1), 0)
+                shares = min(shares, cap_shares)
+            stop = float(r["close"]) - cfg.atr_mult_stop * float(r["atr"])
+            target = float(r["close"]) + 3.0 * float(r["atr"])
+            plan_rows.append({
+                "date": today.isoformat(),
+                "ticker": t,
+                "regime": "RISK_ON" if is_risk_on else "RISK_OFF",
+                "close_ref": float(r["close"]),
+                "atr": float(r["atr"]),
+                "stop_ref": round(float(stop), 4),
+                "target_ref": round(float(target), 4),
+                "shares": int(shares),
+                "notional": round(shares * float(r["close"]), 2),
+                "risk_per_trade": cfg.risk_per_trade,
+                "atr_mult_stop": cfg.atr_mult_stop,
+                "entry_plan": "next_open",
+                "exit_plan": ("trail" if cfg.trailing_stop_mult and cfg.trailing_stop_mult > 0 else f"{cfg.hold_days}d_close"),
+                "score_total": float(r["score_total"]),
+                "score_breakdown": f"T{r['score_trend']:.2f}|M{r['score_momo']:.2f}|V{r['score_volume']:.2f}|B{r['score_breakout']:.2f}|S{r['score_structure']:.2f}",
+                "volr": float(r["volr"]),
+                "pb": float(r["pb"]) if not np.isnan(r["pb"]) else np.nan,
+                "don20": float(r["don20"]) if not np.isnan(r["don20"]) else np.nan,
+                "obv_slope20": float(r["obv_slope20"]),
+                "turnover20": float(r["turnover20"]),
+                "sector": sec,
+            })
+    else:
+        for t, r, _, sec in picks:
+            risk_budget = max(cfg.capital * cfg.risk_per_trade * risk_scale - 2.0 * cfg.commission_per_trade_jpy, 0.0)
+            rps = cfg.atr_mult_stop * max(float(r["atr"]), 1e-6) + (cfg.slippage_bps / 10000.0) * float(r["close"]) * 2.0
+            raw_shares = math.floor(risk_budget / max(rps, 1e-9))
+            lot = cfg.lot_size_map.get(t, cfg.lot_size_default) if cfg.lot_size_default else 1
+            shares = max((raw_shares // max(lot, 1)) * max(lot, 1), 0)
+            # 最低約定金額を満たすよう調整
+            if cfg.min_notional_jpy > 0 and r["close"] * shares < cfg.min_notional_jpy:
+                need = int(math.ceil(cfg.min_notional_jpy / max(r["close"], 1e-6)))
+                shares = max((need // max(lot, 1)) * max(lot, 1), shares)
+            # ティッカー上限
+            if cfg.notional_cap_per_ticker_jpy < 1e17:
+                cap_shares = int(math.floor(cfg.notional_cap_per_ticker_jpy / max(r["close"], 1e-6)))
+                cap_shares = max((cap_shares // max(lot, 1)) * max(lot, 1), 0)
+                shares = min(shares, cap_shares)
+            stop = r["close"] - cfg.atr_mult_stop * r["atr"]
+            target = r["close"] + 3.0 * r["atr"]
+            plan_rows.append({
+                "date": today.isoformat(),
+                "ticker": t,
+                "regime": "RISK_ON" if is_risk_on else "RISK_OFF",
+                "close_ref": float(r["close"]),
+                "atr": float(r["atr"]),
+                "stop_ref": round(float(stop), 4),
+                "target_ref": round(float(target), 4),
+                "shares": int(shares),
+                "notional": round(shares * float(r["close"]), 2),
+                "risk_per_trade": cfg.risk_per_trade,
+                "atr_mult_stop": cfg.atr_mult_stop,
+                "entry_plan": "next_open",
+                "exit_plan": ("trail" if cfg.trailing_stop_mult and cfg.trailing_stop_mult > 0 else f"{cfg.hold_days}d_close"),
+                "score_total": float(r["score_total"]),
+                "score_breakdown": f"T{r['score_trend']:.2f}|M{r['score_momo']:.2f}|V{r['score_volume']:.2f}|B{r['score_breakout']:.2f}|S{r['score_structure']:.2f}",
+                "volr": float(r["volr"]),
+                "pb": float(r["pb"]) if not np.isnan(r["pb"]) else np.nan,
+                "don20": float(r["don20"]) if not np.isnan(r["don20"]) else np.nan,
+                "obv_slope20": float(r["obv_slope20"]),
+                "turnover20": float(r["turnover20"]),
+                "sector": sec,
+            })
 
     # 却下上位（理由つき）
     rej_rows = []
     rejected_sorted = sorted([x for x in filt if len(x[2]) > 0],
                              key=lambda x: x[1]["score_total"], reverse=True)[:5]
-    for t, r, reasons in rejected_sorted:
+    for t, r, reasons, _ in rejected_sorted:
         rej_rows.append({
             "ticker": t,
             "score_total": float(r["score_total"]),
@@ -550,7 +719,7 @@ def main():
         logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="[%(levelname)s] %(message)s")
 
     p = argparse.ArgumentParser(description="Daily Trading Helper JP PLUS")
-    p.add_argument("-c", "--config", default="config.jp.yml")
+    p.add_argument("-c", "--config", default="config/config.jp.yml")
     p.add_argument("--outdir", default=None)
     p.add_argument("--no-email", action="store_true")
     p.add_argument("--dry-run", action="store_true")
@@ -570,13 +739,17 @@ def main():
     tickers = sorted(set([cfg.benchmark] + cfg.universe))
     logger.info("Downloading: %s since %s", ", ".join(tickers), start)
 
+    t0 = time.time()
     frames = download_history(tickers, start, cache_dir=cfg.cache_dir, max_age_days=cfg.cache_max_age_days)
+    logger.info("Timing: data fetch %.3fs", time.time() - t0)
     if cfg.benchmark not in frames or frames[cfg.benchmark].empty:
         logger.error("ベンチマークの価格系列を取得できませんでした。")
         sys.exit(2)
 
+    t1 = time.time()
     is_risk_on = risk_on_regime(frames[cfg.benchmark], cfg.regime_ma)
     score_df = build_scores(cfg, {t: frames[t] for t in cfg.universe if t in frames})
+    logger.info("Timing: scoring %.3fs", time.time() - t1)
 
     write_outputs = not args.dry_run
     if write_outputs:
@@ -586,14 +759,43 @@ def main():
     if write_outputs:
         score_df.to_csv(ranks_csv, index=False, encoding="utf-8")
 
-    block_until = load_event_block(cfg)
-    # 再エントリーブロックを併合
+    block_ranges = load_event_block(cfg)
+    # 再エントリーブロックを併合（endのみ延長）
     re_block = load_reentry_block(cfg)
     for k, v in re_block.items():
-        prev = block_until.get(k)
-        if (prev is None) or (v > prev):
-            block_until[k] = v
-    plan_df, rej_df = decide_candidates(cfg, score_df, is_risk_on, block_until)
+        prev = block_ranges.get(k)
+        if prev is None:
+            block_ranges[k] = (None, v)
+        else:
+            start, end = prev
+            if v > end:
+                block_ranges[k] = (start, v)
+
+    # 相関行列（必要時のみ）
+    corr = None
+    try:
+        if cfg.corr_max < 1.0 and not score_df.empty:
+            tickers_in_scores = [t for t in score_df["ticker"].tolist() if t in frames]
+            cols = []
+            for t in tickers_in_scores:
+                df = frames[t]
+                s = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+                cols.append(s.rename(t))
+            if cols:
+                t2 = time.time()
+                mat = pd.concat(cols, axis=1, join="inner").dropna()
+                if len(mat) > cfg.corr_lookback_days + 2:
+                    mat = mat.iloc[-cfg.corr_lookback_days - 1:]
+                rets = mat.pct_change().dropna(how="all").fillna(0.0)
+                cm = rets.corr().fillna(0.0)
+                corr = {i: cm.loc[i].to_dict() for i in cm.index}
+                logger.info("Timing: correlation %.3fs", time.time() - t2)
+    except Exception:
+        corr = None
+
+    t3 = time.time()
+    plan_df, rej_df = decide_candidates(cfg, score_df, is_risk_on, block_ranges, corr=corr)
+    logger.info("Timing: decide %.3fs", time.time() - t3)
     plan_csv = os.path.join(cfg.outdir, f"plan_{ts}.csv")
     if write_outputs:
         plan_df.to_csv(plan_csv, index=False, encoding="utf-8")
@@ -647,10 +849,21 @@ def main():
             pass
         try:
             runtime_sec = (dt.datetime.now() - start_all).total_seconds()
+            picks_count = len(plan_df) if not plan_df.empty else 0
+            rejects_count = len(rej_df) if not rej_df.empty else 0
             metrics = [
-                f"daily_picks_count {len(plan_df) if not plan_df.empty else 0}",
+                f"daily_picks_count {picks_count}",
+                f"daily_rejects_count {rejects_count}",
                 f"script_run_seconds{{script=\"daily\"}} {runtime_sec:.3f}",
             ]
+            # セクター分布
+            try:
+                if not plan_df.empty and "sector" in plan_df.columns:
+                    vc = plan_df["sector"].value_counts()
+                    for sec, cnt in vc.items():
+                        metrics.append(f"daily_picks_sector_count{{sector=\"{sec}\"}} {int(cnt)}")
+            except Exception:
+                pass
             with open(os.path.join(cfg.outdir, "metrics.prom"), "w", encoding="utf-8") as f:
                 f.write("\n".join(metrics) + "\n")
         except Exception:
@@ -661,3 +874,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _ensure_series(x: Any, index: pd.Index) -> pd.Series:
+    """返り値を安全に Series 化して、指定 index に合わせる。
+    DataFrame が来た場合は先頭列を使用。
+    """
+    try:
+        if isinstance(x, pd.Series):
+            return x.reindex(index)
+        if isinstance(x, pd.DataFrame):
+            if x.shape[1] >= 1:
+                return x.iloc[:, 0].reindex(index)
+        # スカラや配列の場合
+        s = pd.Series(x, index=index)
+        return s
+    except Exception:
+        return pd.Series(index=index, dtype=float)

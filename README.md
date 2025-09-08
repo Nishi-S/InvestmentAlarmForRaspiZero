@@ -32,6 +32,7 @@
 1) 仮想環境と依存の導入
 - `python -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements.txt`
+- （推奨）パッケージを開発インストール: `pip install -e .`
 
 2) 設定ファイルを編集
 - `config.jp.yml`: ユニバース/資金/ロット/売買代金しきい値/重み 等
@@ -44,9 +45,12 @@
   - `LOG_LEVEL=INFO`（任意: `DEBUG/INFO/WARN/ERROR`）
 
 ## 使い方（手動実行）
-- デイリー: `python -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml [--outdir DIR] [--no-email] [--dry-run]`
-- アラーム: `python -m investment_alarm.investment_alarms -c config/config.alarms.yml [--outdir DIR] [--no-email] [--dry-run]`
-  - もしくはエントリスクリプト: `bin/daily-jp ...`, `bin/investment-alarms ...`
+- いずれかの方法で実行してください。
+  - 例1（推奨・簡単）: `./bin/daily-jp -c config/config.jp.yml` / `./bin/investment-alarms -c config/config.alarms.yml`
+  - 例2（開発インストール後）: `python -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml`
+    / `python -m investment_alarm.investment_alarms -c config/config.alarms.yml`
+  - 例3（環境変数で実行）: `PYTHONPATH=src python -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml`
+    / `PYTHONPATH=src python -m investment_alarm.investment_alarms -c config/config.alarms.yml`
 
 出力（既定）:
 - デイリー: `reports/plan_*.csv`, `reports/ranks_*.csv`, `reports/plan_latest.json`, `reports/status.html`, `reports/metrics.prom`
