@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 
 # Ensure repo root on path for direct module imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from daily_system_jp_plus import (
+from investment_alarm.daily_system_jp_plus import (
     compute_features,
     risk_on_regime,
     build_scores,

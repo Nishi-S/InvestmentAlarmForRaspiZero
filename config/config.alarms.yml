@@ -50,3 +50,4 @@ state_file: reports_alarms/alarms_state.json
 # デイリープランの要約を同報
 digest_include_daily: true
 daily_latest_json: reports/plan_latest.json
+

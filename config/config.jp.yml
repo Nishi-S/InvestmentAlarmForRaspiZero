@@ -141,7 +141,7 @@ lot_size_default: 1
 lot_size_map: {}
 
 # イベント除外リスト（任意）: CSV で "ticker,until,reason"（untilはYYYY-MM-DD）
-events_csv: events_ignore.csv
+events_csv: config/events_ignore.csv
 
 # メール送信（任意）: Gmailのアプリパスワード推奨（環境変数 EMAIL_USER / EMAIL_PASS を使用）
 email_enabled: false

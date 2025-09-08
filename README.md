@@ -5,12 +5,11 @@
 注意: 本リポジトリは教育・情報提供のみを目的としています。実売買は自己責任で、必ずご自身で検証してください。
 
 **主な構成**
-- デイリー選定: `daily_system_jp_plus.py`
-- アラーム監視: `investment_alarms.py`
-- 通知（Gmail）: `notify.py`
-- ステータスHTML: `status_page.py`
-- データ取得/キャッシュ: `utils_data.py`
-- 設定例: `config.jp.yml`, `config.alarms.yml`
+- パッケージ: `src/investment_alarm/`（デイリー/アラーム/通知/ステータス/データ取得）
+- デイリー選定: `src/investment_alarm/daily_system_jp_plus.py`
+- アラーム監視: `src/investment_alarm/investment_alarms.py`
+- 設定: `config/config.jp.yml`, `config/config.alarms.yml`, `config/events_ignore.csv`
+- エントリ: `bin/daily-jp`, `bin/investment-alarms`
 - systemdユニット: `systemd/*.service`, `systemd/*.timer`
 
 ## 機能概要
@@ -45,8 +44,9 @@
   - `LOG_LEVEL=INFO`（任意: `DEBUG/INFO/WARN/ERROR`）
 
 ## 使い方（手動実行）
-- デイリー: `python daily_system_jp_plus.py -c config.jp.yml [--outdir DIR] [--no-email] [--dry-run]`
-- アラーム: `python investment_alarms.py -c config.alarms.yml [--outdir DIR] [--no-email] [--dry-run]`
+- デイリー: `python -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml [--outdir DIR] [--no-email] [--dry-run]`
+- アラーム: `python -m investment_alarm.investment_alarms -c config/config.alarms.yml [--outdir DIR] [--no-email] [--dry-run]`
+  - もしくはエントリスクリプト: `bin/daily-jp ...`, `bin/investment-alarms ...`
 
 出力（既定）:
 - デイリー: `reports/plan_*.csv`, `reports/ranks_*.csv`, `reports/plan_latest.json`, `reports/status.html`, `reports/metrics.prom`
@@ -59,7 +59,7 @@
 - `sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/`
 - 例: `systemd/daily-jp.service` は以下を参照
   - `WorkingDirectory=/home/nishi/InvestmentAlarmForRaspiZero`
-  - `ExecStart=/home/nishi/InvestmentAlarmForRaspiZero/.venv/bin/python -u daily_system_jp_plus.py -c config.jp.yml`
+  - `ExecStart=/home/nishi/InvestmentAlarmForRaspiZero/.venv/bin/python -u -m investment_alarm.daily_system_jp_plus -c config/config.jp.yml`
 
 2) タイムゾーン（JST）設定（任意）
 - `sudo timedatectl set-timezone Asia/Tokyo`

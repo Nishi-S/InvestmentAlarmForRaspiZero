@@ -94,3 +94,4 @@ def download_with_cache(
     if missing:
         logger.warning("Data unavailable for tickers (no download and no cache): %s", ", ".join(sorted(missing)))
     return out
+
