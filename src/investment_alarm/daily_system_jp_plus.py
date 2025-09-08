@@ -24,9 +24,9 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
-from utils_data import download_with_cache
-from notify import send_email as _send_email
-from status_page import generate_status_html
+from .utils_data import download_with_cache
+from .notify import send_email as _send_email
+from .status_page import generate_status_html
 
 logger = logging.getLogger(__name__)
 
